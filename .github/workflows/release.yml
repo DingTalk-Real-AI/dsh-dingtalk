@@ -110,7 +110,10 @@ jobs:
           published_version="$(npm view "$PACKAGE_NAME@$release_version" version)"
           [[ "$published_version" == "$release_version" ]]
           [[ "$attestation_url" == *"/-/npm/v1/attestations/"* ]]
-          public_cli_version="$(npx --yes "$PACKAGE_NAME@$release_version" --version)"
+          public_cli_version="$({
+            cd "$RUNNER_TEMP"
+            npx --yes --registry=https://registry.npmjs.org --package "$PACKAGE_NAME@$release_version" dsh-dingtalk --version
+          })"
           [[ "$public_cli_version" == "$release_version" ]]
           gh release view "v$release_version" >/dev/null
           tag_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v$release_version" --jq .object.sha)"
