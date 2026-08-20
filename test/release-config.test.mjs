@@ -29,7 +29,11 @@ test('组织公开仓库从 0.5.0 开始通过 Trusted Publisher 发布正式版
   assert.match(releaseWorkflow, /dist\.attestations\.url/)
   assert.match(releaseWorkflow, /repository\.url/)
   assert.match(releaseWorkflow, /gh release view/)
-  assert.match(releaseWorkflow, /npx --yes "\$PACKAGE_NAME@\$release_version" --version/)
+  assert.match(releaseWorkflow, /cd "\$RUNNER_TEMP"/)
+  assert.match(
+    releaseWorkflow,
+    /npx --yes --registry=https:\/\/registry\.npmjs\.org --package "\$PACKAGE_NAME@\$release_version" dsh-dingtalk --version/,
+  )
   assert.match(releaseWorkflow, /already belongs to this commit/)
   assert.doesNotMatch(releaseWorkflow, /NODE_AUTH_TOKEN|NPM_BOOTSTRAP_TOKEN|NPM_CONFIG_PROVENANCE: 'false'/)
 })
