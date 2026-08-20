@@ -1,0 +1,32 @@
+name: Bug 报告
+description: 报告可复现的 DSH 钉钉连接器问题
+title: 'fix: '
+body:
+  - type: markdown
+    attributes:
+      value: 请删除所有 Secret、二维码、绑定口令、聊天内容和内部地址。
+  - type: input
+    id: version
+    attributes:
+      label: 连接器版本
+      placeholder: latest
+    validations:
+      required: true
+  - type: input
+    id: dsh
+    attributes:
+      label: DSH 版本
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 最小复现步骤
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望与实际结果
+    validations:
+      required: true

@@ -1,0 +1,123 @@
+name: Publish to NPM
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: npm-production-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: npm-production
+    env:
+      PACKAGE_NAME: '@dingtalk-real-ai/dsh-dingtalk'
+      BOOTSTRAP_VERSION: '0.5.0'
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      NPM_CONFIG_PROVENANCE: 'true'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11.7.0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - run: npm install --global npm@latest
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run ci
+      - name: Determine release mode
+        id: release-mode
+        shell: bash
+        run: |
+          if git describe --tags --match 'v*' --abbrev=0 >/dev/null 2>&1; then
+            echo "mode=semantic" >> "$GITHUB_OUTPUT"
+          else
+            echo "mode=bootstrap" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Inspect bootstrap release state
+        id: bootstrap-state
+        if: steps.release-mode.outputs.mode == 'bootstrap'
+        shell: bash
+        run: |
+          if published_git_head="$(npm view "$PACKAGE_NAME@$BOOTSTRAP_VERSION" gitHead 2>/dev/null)"; then
+            if [[ "$published_git_head" != "$GITHUB_SHA" ]]; then
+              echo "$PACKAGE_NAME@$BOOTSTRAP_VERSION belongs to $published_git_head, not $GITHUB_SHA; refusing to overwrite an immutable NPM version."
+              exit 1
+            fi
+            echo "$PACKAGE_NAME@$BOOTSTRAP_VERSION already belongs to this commit; resuming the remaining release steps."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Publish the first organization NPM version
+        if: steps.release-mode.outputs.mode == 'bootstrap' && steps.bootstrap-state.outputs.publish == 'true'
+        shell: bash
+        run: |
+          npm version "$BOOTSTRAP_VERSION" --no-git-tag-version
+          npm publish --access public --tag latest
+      - name: Create or verify the first organization GitHub Release
+        if: steps.release-mode.outputs.mode == 'bootstrap'
+        shell: bash
+        run: |
+          if gh release view "v$BOOTSTRAP_VERSION" >/dev/null 2>&1; then
+            tag_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v$BOOTSTRAP_VERSION" --jq .object.sha)"
+            if [[ "$tag_sha" != "$GITHUB_SHA" ]]; then
+              echo "v$BOOTSTRAP_VERSION points to $tag_sha, not $GITHUB_SHA."
+              exit 1
+            fi
+            echo "GitHub Release v$BOOTSTRAP_VERSION already exists for this commit."
+          else
+            gh release create "v$BOOTSTRAP_VERSION" \
+              --target "$GITHUB_SHA" \
+              --title "v$BOOTSTRAP_VERSION" \
+              --generate-notes
+          fi
+      - name: Publish the automatically calculated release
+        if: steps.release-mode.outputs.mode == 'semantic'
+        run: pnpm exec semantic-release
+      - name: Read back the public release
+        shell: bash
+        run: |
+          for attempt in {1..12}; do
+            release_version="$(npm view "$PACKAGE_NAME" dist-tags.latest 2>/dev/null || true)"
+            git_head="$(npm view "$PACKAGE_NAME@$release_version" gitHead 2>/dev/null || true)"
+            repository_url="$(npm view "$PACKAGE_NAME@$release_version" repository.url 2>/dev/null || true)"
+            attestation_url="$(npm view "$PACKAGE_NAME@$release_version" dist.attestations.url 2>/dev/null || true)"
+            if [[ "$git_head" == "$GITHUB_SHA" && \
+                  "$repository_url" == "git+https://github.com/DingTalk-Real-AI/dsh-dingtalk.git" && \
+                  -n "$attestation_url" ]]; then
+              break
+            fi
+            if [[ "$attempt" == 12 ]]; then
+              echo "NPM read-back did not converge on this commit with the expected repository and provenance."
+              exit 1
+            fi
+            sleep 5
+          done
+
+          published_version="$(npm view "$PACKAGE_NAME@$release_version" version)"
+          [[ "$published_version" == "$release_version" ]]
+          [[ "$attestation_url" == *"/-/npm/v1/attestations/"* ]]
+          public_cli_version="$(npx --yes "$PACKAGE_NAME@$release_version" --version)"
+          [[ "$public_cli_version" == "$release_version" ]]
+          gh release view "v$release_version" >/dev/null
+          tag_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v$release_version" --jq .object.sha)"
+          [[ "$tag_sha" == "$GITHUB_SHA" ]]
+
+          echo "Verified $PACKAGE_NAME@$release_version"
+          echo "latest=$release_version gitHead=$git_head"
+          echo "repository=$repository_url"
+          echo "provenance=$attestation_url"
+          echo "public-cli=$public_cli_version"

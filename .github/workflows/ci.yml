@@ -1,0 +1,85 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: node scripts/check-secrets.mjs
+
+  pr-title:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: node scripts/check-pr-title.mjs
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            experimental: false
+          - os: macos-latest
+            experimental: false
+          - os: windows-latest
+            experimental: true
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11.7.0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run ci
+
+  packed-dsh-smoke:
+    name: Packed package with latest DSH
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11.7.0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: pnpm
+      - run: npm install --global npm@latest @deepseek-ai/dsh@latest
+      - run: pnpm install --frozen-lockfile
+      - name: Validate public artifact with latest NPM
+        run: pnpm run test:pack
+      - name: Pack public artifact
+        id: pack
+        shell: bash
+        run: |
+          tarball="$(npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP" --silent)"
+          echo "path=$RUNNER_TEMP/$tarball" >> "$GITHUB_OUTPUT"
+      - name: Install packed artifact into a clean web profile
+        shell: bash
+        env:
+          DSH_HOME: ${{ runner.temp }}/dsh-home
+        run: dsh plugin --profile web add "${{ steps.pack.outputs.path }}"
+      - name: Boot latest DSH with the packed plugin
+        env:
+          DSH_HOME: ${{ runner.temp }}/dsh-home
+          DSH_DINGTALK_STATE_DIR: ${{ runner.temp }}/dsh-dingtalk-state
+        run: node scripts/smoke-dsh.mjs

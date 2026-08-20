@@ -1,0 +1,95 @@
+{
+  "name": "@dingtalk-real-ai/dsh-dingtalk",
+  "version": "0.0.0-development",
+  "description": "Official DingTalk connector for DeepSeek Harness",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "import": "./lib/index.js"
+    }
+  },
+  "bin": {
+    "dsh-dingtalk": "lib/bin.js"
+  },
+  "license": "MIT",
+  "author": "DingTalk Real Team",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/DingTalk-Real-AI/dsh-dingtalk.git"
+  },
+  "homepage": "https://github.com/DingTalk-Real-AI/dsh-dingtalk#readme",
+  "bugs": {
+    "url": "https://github.com/DingTalk-Real-AI/dsh-dingtalk/issues"
+  },
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "packageManager": "pnpm@11.7.0",
+  "files": [
+    "lib",
+    "assets",
+    "cordis.patch.yml",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
+    "CHANGELOG.md",
+    "README.md",
+    "README.zh-CN.md"
+  ],
+  "scripts": {
+    "clean": "node scripts/clean.mjs",
+    "build": "pnpm run clean && tsc -p tsconfig.json",
+    "postbuild": "node -e \"require('node:fs').chmodSync('lib/bin.js', 0o755)\"",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "prettier --check .",
+    "format": "prettier --write .",
+    "test": "pnpm run build && node --experimental-test-module-mocks --test test/*.test.mjs",
+    "test:pack": "pnpm run build && node scripts/check-pack.mjs",
+    "scan:secrets": "node scripts/check-secrets.mjs",
+    "ci": "pnpm run scan:secrets && pnpm run lint && pnpm run typecheck && pnpm test && pnpm run test:pack",
+    "prepack": "pnpm run build"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "dingtalk",
+    "channel",
+    "im-bot",
+    "cordis"
+  ],
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.1",
+    "dingtalk-stream": "^2.1.4",
+    "qrcode-terminal": "^0.12.0",
+    "yaml": "^2.8.1"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@semantic-release/commit-analyzer": "^13.0.1",
+    "@semantic-release/github": "^11.0.6",
+    "@semantic-release/npm": "^13.1.4",
+    "@semantic-release/release-notes-generator": "^14.1.0",
+    "@types/node": "^22.20.0",
+    "@types/qrcode-terminal": "^0.12.2",
+    "conventional-changelog-conventionalcommits": "^9.1.0",
+    "prettier": "^3.6.2",
+    "semantic-release": "^24.2.9",
+    "typescript": "^6.0.3"
+  },
+  "publishConfig": {
+    "access": "public",
+    "tag": "latest",
+    "provenance": true
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

@@ -1,0 +1,5 @@
+packages:
+  - .
+
+overrides:
+  '@octokit/request': 10.0.13

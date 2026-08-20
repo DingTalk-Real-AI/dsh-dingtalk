@@ -1,0 +1,3 @@
+- insert:
+    - id: dingtalk-channel
+      name: '@dingtalk-real-ai/dsh-dingtalk'
