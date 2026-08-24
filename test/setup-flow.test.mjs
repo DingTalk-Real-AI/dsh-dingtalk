@@ -133,8 +133,11 @@ test('首次 setup 自动安装精确插件版本并完成完整引导', async (
   assert.doesNotMatch(ui.messages.join('\n'), /super-secret/)
   assert.doesNotMatch(ui.prompted.join(','), /interactionCardTemplateId/)
   assert.deepEqual(parse(await readFile(path.join(dshHome, '.credentials.yaml'), 'utf8')), {
-    DINGTALK_CLIENT_ID: 'ding-app',
-    DINGTALK_CLIENT_SECRET: 'super-secret',
+    version: 1,
+    refs: {
+      DINGTALK_CLIENT_ID: 'ding-app',
+      DINGTALK_CLIENT_SECRET: 'super-secret',
+    },
   })
   assert.deepEqual(parse(await readFile(path.join(dshHome, 'profiles', 'web', 'cordis.patch.yml'), 'utf8')), [
     {
@@ -225,8 +228,11 @@ test('重复 setup 可只修改功能配置并保留现有凭据', async (t) => 
   assert.equal(result.code, 0)
   assert.match(ui.confirmMessages.get('startWeb'), /\/bind/)
   assert.deepEqual(parse(await readFile(path.join(dshHome, '.credentials.yaml'), 'utf8')), {
-    DINGTALK_CLIENT_ID: 'existing-id',
-    DINGTALK_CLIENT_SECRET: 'existing-secret',
+    version: 1,
+    refs: {
+      DINGTALK_CLIENT_ID: 'existing-id',
+      DINGTALK_CLIENT_SECRET: 'existing-secret',
+    },
   })
   assert.match(ui.messages.join('\n'), /机器人 default 的一次性管理员绑定口令/)
   assert.deepEqual(parse(await readFile(path.join(dshHome, 'profiles', 'web', 'cordis.patch.yml'), 'utf8')), [
@@ -306,10 +312,13 @@ test('重复 setup 可新增第二个机器人账号且不覆盖默认账号', a
 
   assert.equal(result.code, 0)
   assert.deepEqual(parse(await readFile(path.join(dshHome, '.credentials.yaml'), 'utf8')), {
-    DINGTALK_CLIENT_ID: 'default-id',
-    DINGTALK_CLIENT_SECRET: 'default-secret',
-    DINGTALK_ACCOUNT_SUPPORT_BOT_CLIENT_ID: 'support-id',
-    DINGTALK_ACCOUNT_SUPPORT_BOT_CLIENT_SECRET: 'support-secret',
+    version: 1,
+    refs: {
+      DINGTALK_CLIENT_ID: 'default-id',
+      DINGTALK_CLIENT_SECRET: 'default-secret',
+      DINGTALK_ACCOUNT_SUPPORT_BOT_CLIENT_ID: 'support-id',
+      DINGTALK_ACCOUNT_SUPPORT_BOT_CLIENT_SECRET: 'support-secret',
+    },
   })
   const profile = parse(await readFile(path.join(dshHome, 'profiles', 'web', 'cordis.patch.yml'), 'utf8'))
   assert.deepEqual(

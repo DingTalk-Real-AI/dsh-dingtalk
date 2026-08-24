@@ -129,7 +129,7 @@ dsh web
 
 ## 凭据和本地文件
 
-新凭据写入 `$DSH_HOME/.credentials.yaml`，文件权限仅限当前用户。默认机器人使用 `DINGTALK_CLIENT_ID` 和 `DINGTALK_CLIENT_SECRET`；其他机器人使用带机器人标识的独立引用，例如 `support-bot` 对应 `DINGTALK_ACCOUNT_SUPPORT_BOT_CLIENT_ID` 和 `DINGTALK_ACCOUNT_SUPPORT_BOT_CLIENT_SECRET`。`$DSH_HOME/.env` 中已有的默认机器人凭据可以由 setup 迁移；旧 profile 中的明文凭据覆盖会在迁移时清理。
+新凭据写入 `$DSH_HOME/.credentials.yaml`，文件权限仅限当前用户。默认机器人使用 `DINGTALK_CLIENT_ID` 和 `DINGTALK_CLIENT_SECRET`；其他机器人使用带机器人标识的独立引用，例如 `support-bot` 对应 `DINGTALK_ACCOUNT_SUPPORT_BOT_CLIENT_ID` 和 `DINGTALK_ACCOUNT_SUPPORT_BOT_CLIENT_SECRET`。setup 按 DSH 的版本化凭据文档读写，在共享的 DSH 写锁内只更新这些钉钉引用，并保留无关的引用、记录和注释；旧扁平凭据文档会在下一次 setup 写入时迁移为 DSH v1。`$DSH_HOME/.env` 中已有的默认机器人凭据也可以由 setup 迁移；旧 profile 中的明文凭据覆盖会在迁移时清理。
 
 默认机器人的运行状态继续位于 `~/.dsh-dingtalk/`，其他机器人隔离在 `~/.dsh-dingtalk/accounts/<机器人标识>/`。管理员绑定、会话映射、消息去重和能力状态不会跨机器人共享；管理员绑定口令不会以明文落盘。`doctor` 会按机器人分别展示诊断结果。
 

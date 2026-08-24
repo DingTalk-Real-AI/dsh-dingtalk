@@ -118,7 +118,7 @@ If configuration is incomplete, the plugin logs the exact-version `npx ... setup
 
 ## Credentials and local files
 
-New credentials are stored in `$DSH_HOME/.credentials.yaml` with owner-only permissions. The default account uses `DINGTALK_CLIENT_ID` and `DINGTALK_CLIENT_SECRET`; additional accounts use namespaced references. For example, `support-bot` uses `DINGTALK_ACCOUNT_SUPPORT_BOT_CLIENT_ID` and `DINGTALK_ACCOUNT_SUPPORT_BOT_CLIENT_SECRET`. Setup can migrate an existing default account from `$DSH_HOME/.env` and removes legacy plaintext profile overrides during migration.
+New credentials are stored in `$DSH_HOME/.credentials.yaml` with owner-only permissions. The default account uses `DINGTALK_CLIENT_ID` and `DINGTALK_CLIENT_SECRET`; additional accounts use namespaced references. For example, `support-bot` uses `DINGTALK_ACCOUNT_SUPPORT_BOT_CLIENT_ID` and `DINGTALK_ACCOUNT_SUPPORT_BOT_CLIENT_SECRET`. Setup reads and writes the versioned DSH credential document, updates only these DingTalk references under the shared DSH writer lock, and preserves unrelated references, records, and comments. A legacy flat credential document is migrated to the DSH v1 layout on the next setup write. Setup can also migrate an existing default account from `$DSH_HOME/.env` and removes legacy plaintext profile overrides during migration.
 
 The default account keeps its runtime state under `~/.dsh-dingtalk/`. Additional accounts are isolated under `~/.dsh-dingtalk/accounts/<account-id>/`; owner bindings, session mappings, deduplication and capability state are not shared across accounts. Owner challenges are stored as salted digests, never as plaintext codes. `doctor` reports each account separately.
 

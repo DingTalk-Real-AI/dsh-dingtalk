@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
-import { chmod, mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises'
+import { chmod, lstat, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
-import { parse, stringify } from 'yaml'
+import { isMap, parse, parseDocument, stringify, YAMLMap } from 'yaml'
 import { accountCredentialRefs, assertAccountId, DEFAULT_ACCOUNT_ID, type AccountCredentialRefs } from './accounts.js'
 import type { DingTalkAppCredentials } from './credentials.js'
 
@@ -84,17 +84,160 @@ async function assertPrivateFile(file: string): Promise<void> {
   }
 }
 
-function parseCredentialDocument(source: string | undefined, file: string): Record<string, string> {
-  if (source === undefined || source.trim() === '') return {}
-  const value = parse(source, { uniqueKeys: true })
-  if (value === null) return {}
-  if (typeof value !== 'object' || Array.isArray(value)) throw new Error(`凭据文件 ${file} 必须是 YAML mapping`)
+interface CredentialDocument {
+  refs: Record<string, string>
+  setRef(key: string, value: string): void
+  serialize(): string
+}
+
+function validateCredentialRefs(value: unknown, file: string): Record<string, string> {
+  if (value === undefined || value === null) return {}
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error(`凭据文件 ${file} 的 refs 必须是 YAML mapping`)
+  }
   for (const [key, entry] of Object.entries(value)) {
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || typeof entry !== 'string' || entry.length === 0) {
       throw new Error(`凭据文件 ${file} 包含无效条目 ${key}`)
     }
   }
   return value as Record<string, string>
+}
+
+function assertCredentialRecordFields(
+  key: string,
+  fields: Record<string, unknown>,
+  allowed: readonly string[],
+  file: string,
+): void {
+  for (const field of Object.keys(fields)) {
+    if (!allowed.includes(field)) {
+      throw new Error(`凭据文件 ${file} 的 record ${key} 包含未知字段 ${field}`)
+    }
+  }
+}
+
+function assertJsonCredentialValue(value: unknown, key: string, file: string, seen = new Set<object>()): void {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return
+  if (typeof value === 'number') {
+    if (Number.isFinite(value)) return
+    throw new Error(`凭据文件 ${file} 的 record ${key} payload 包含非有限数字`)
+  }
+  if (typeof value === 'object') {
+    if (seen.has(value)) throw new Error(`凭据文件 ${file} 的 record ${key} payload 包含循环引用`)
+    if (Object.getPrototypeOf(value) === Object.prototype || Array.isArray(value)) {
+      seen.add(value)
+      for (const nested of Object.values(value)) assertJsonCredentialValue(nested, key, file, seen)
+      seen.delete(value)
+      return
+    }
+  }
+  throw new Error(`凭据文件 ${file} 的 record ${key} payload 不是 JSON 可表示的值`)
+}
+
+function validateCredentialRecords(value: unknown, file: string): void {
+  if (value === undefined || value === null) return
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`凭据文件 ${file} 的 records 必须是 YAML mapping`)
+  }
+  for (const [key, record] of Object.entries(value)) {
+    if (!/^[a-z][a-z0-9-]*\/[a-z][a-z0-9-]*$/.test(key)) {
+      throw new Error(`凭据文件 ${file} 包含无效的 record key ${key}`)
+    }
+    if (typeof record !== 'object' || record === null || Array.isArray(record)) {
+      throw new Error(`凭据文件 ${file} 的 record ${key} 必须是 YAML mapping`)
+    }
+    const fields = record as Record<string, unknown>
+    if (fields.kind === 'api-key') {
+      assertCredentialRecordFields(key, fields, ['kind', 'key', 'env'], file)
+      if (fields.key !== undefined && (typeof fields.key !== 'string' || fields.key.length === 0)) {
+        throw new Error(`凭据文件 ${file} 的 record ${key} 包含无效的 api-key key`)
+      }
+      if (fields.env !== undefined) {
+        if (typeof fields.env !== 'object' || fields.env === null || Array.isArray(fields.env)) {
+          throw new Error(`凭据文件 ${file} 的 record ${key} env 必须是 YAML mapping`)
+        }
+        for (const [name, entry] of Object.entries(fields.env)) {
+          if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || typeof entry !== 'string' || entry.length === 0) {
+            throw new Error(`凭据文件 ${file} 的 record ${key} 包含无效 env 条目 ${name}`)
+          }
+        }
+      }
+      continue
+    }
+    if (fields.kind === 'grant') {
+      assertCredentialRecordFields(key, fields, ['kind', 'payload'], file)
+      if (!('payload' in fields)) throw new Error(`凭据文件 ${file} 的 record ${key} 缺少 payload`)
+      assertJsonCredentialValue(fields.payload, key, file)
+      continue
+    }
+    if (fields.kind === undefined) throw new Error(`凭据文件 ${file} 的 record ${key} 缺少 kind`)
+    throw new Error(`凭据文件 ${file} 的 record ${key} 使用未知 kind`)
+  }
+}
+
+function parseCredentialDocument(source: string | undefined, file: string): CredentialDocument {
+  let document = parseDocument(source ?? '', { uniqueKeys: true })
+  if (document.errors.length) {
+    throw new Error(`凭据文件 ${file} 不是有效的 YAML 文档`)
+  }
+
+  let refsNode: YAMLMap
+  let refs: Record<string, string>
+  if (document.contents === null) {
+    const commentBefore = document.commentBefore
+    const comment = document.comment
+    document = parseDocument('version: 1\nrefs: {}\n', { uniqueKeys: true })
+    document.commentBefore = commentBefore
+    document.comment = comment
+    const createdRefs = document.get('refs', true)
+    if (!isMap(createdRefs)) throw new Error(`无法初始化凭据文件 ${file}`)
+    refsNode = createdRefs
+    refs = {}
+  } else {
+    if (!isMap(document.contents)) throw new Error(`凭据文件 ${file} 必须是 YAML mapping`)
+    const value = document.toJS() as Record<string, unknown>
+    if ('version' in value) {
+      if (value.version !== 1) throw new Error(`凭据文件 ${file} 使用不受支持的版本 ${String(value.version)}`)
+      for (const key of Object.keys(value)) {
+        if (key !== 'version' && key !== 'refs' && key !== 'records') {
+          throw new Error(`凭据文件 ${file} 包含未知的顶层字段 ${key}`)
+        }
+      }
+      validateCredentialRecords(value.records, file)
+      refs = validateCredentialRefs(value.refs, file)
+      const currentRefs = document.get('refs', true)
+      if (value.refs === undefined || value.refs === null) {
+        const createdMap = new YAMLMap()
+        const currentComment = (currentRefs as { comment?: unknown } | undefined)?.comment
+        if (typeof currentComment === 'string') createdMap.commentBefore = currentComment
+        document.set('refs', createdMap)
+        const createdRefs = document.get('refs', true)
+        if (!isMap(createdRefs)) throw new Error(`无法初始化凭据文件 ${file} 的 refs`)
+        refsNode = createdRefs
+      } else {
+        if (!isMap(currentRefs)) throw new Error(`凭据文件 ${file} 的 refs 必须是 YAML mapping`)
+        refsNode = currentRefs
+      }
+    } else {
+      refs = validateCredentialRefs(value, file)
+      const legacyRefs = document.contents
+      document = parseDocument('version: 1\nrefs: {}\n', { uniqueKeys: true })
+      document.set('refs', legacyRefs)
+      const migratedRefs = document.get('refs', true)
+      if (!isMap(migratedRefs)) throw new Error(`无法迁移凭据文件 ${file}`)
+      refsNode = migratedRefs
+    }
+  }
+
+  return {
+    refs,
+    setRef(key, value) {
+      refsNode.set(key, value)
+    },
+    serialize() {
+      return document.toString({ lineWidth: 0 })
+    },
+  }
 }
 
 async function atomicPrivateWrite(file: string, content: string): Promise<void> {
@@ -104,6 +247,42 @@ async function atomicPrivateWrite(file: string, content: string): Promise<void> 
   await chmod(temporary, 0o600)
   await rename(temporary, file)
   await chmod(file, 0o600)
+}
+
+async function isCredentialLockContention(error: unknown, lockFile: string): Promise<boolean> {
+  const code = (error as NodeJS.ErrnoException | null)?.code
+  if (code === 'EEXIST') return true
+  if (code !== 'EPERM') return false
+  try {
+    await lstat(lockFile)
+    return true
+  } catch {
+    return false
+  }
+}
+
+// 与 DSH dsh-atomic-write 共用 `<凭据文件>.lock` 协议，确保双方的读改写不会互相覆盖。
+async function withCredentialFileLock<T>(file: string, operation: () => Promise<T>): Promise<T> {
+  await mkdir(path.dirname(file), { recursive: true, mode: 0o700 })
+  const lockFile = `${file}.lock`
+  const deadline = Date.now() + 30_000
+  let delay = 20
+  for (;;) {
+    try {
+      await writeFile(lockFile, `${process.pid}\n`, { mode: 0o600, flag: 'wx' })
+      break
+    } catch (error) {
+      if (!(await isCredentialLockContention(error, lockFile))) throw error
+    }
+    if (Date.now() >= deadline) throw new Error(`等待凭据文件写锁超时：${lockFile}`)
+    await new Promise((resolve) => setTimeout(resolve, delay))
+    delay = Math.min(delay * 2, 200)
+  }
+  try {
+    return await operation()
+  } finally {
+    await rm(lockFile, { force: true })
+  }
 }
 
 function parseLegacyEnv(
@@ -135,9 +314,9 @@ export async function loadDingTalkAccountCredentials(
   const source = await readOptional(file)
   if (source !== undefined) {
     await assertPrivateFile(file)
-    const values = parseCredentialDocument(source, file)
-    const clientId = values[credentialRefs.clientIdRef] ?? ''
-    const clientSecret = values[credentialRefs.clientSecretRef] ?? ''
+    const document = parseCredentialDocument(source, file)
+    const clientId = document.refs[credentialRefs.clientIdRef] ?? ''
+    const clientSecret = document.refs[credentialRefs.clientSecretRef] ?? ''
     if (clientId && clientSecret) return { clientId, clientSecret, source: 'credentials' }
   }
 
@@ -162,13 +341,15 @@ export async function saveDingTalkAccountCredentials(
     throw new Error('Client ID 和 Client Secret 不能为空')
   const refs = accountCredentialRefs(accountId)
   const file = credentialsPath(dshHome)
-  const existing = await readOptional(file)
-  if (existing !== undefined) await assertPrivateFile(file)
-  const values = parseCredentialDocument(existing, file)
-  values[refs.clientIdRef] = credentials.clientId.trim()
-  values[refs.clientSecretRef] = credentials.clientSecret.trim()
-  await atomicPrivateWrite(file, stringify(values, { lineWidth: 0 }))
-  return file
+  return withCredentialFileLock(file, async () => {
+    const existing = await readOptional(file)
+    if (existing !== undefined) await assertPrivateFile(file)
+    const document = parseCredentialDocument(existing, file)
+    document.setRef(refs.clientIdRef, credentials.clientId.trim())
+    document.setRef(refs.clientSecretRef, credentials.clientSecret.trim())
+    await atomicPrivateWrite(file, document.serialize())
+    return file
+  })
 }
 
 function profileEntries(source: string | undefined, file: string): Array<Record<string, unknown>> {
