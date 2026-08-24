@@ -25,6 +25,8 @@ test('组织公开仓库从 0.5.0 开始通过 Trusted Publisher 发布正式版
   assert.equal(packageJson.publishConfig.provenance, true)
   assert.match(releaseWorkflow, /id-token: write/)
   assert.match(releaseWorkflow, /node-version: '24\.10\.0'/)
+  assert.match(releaseWorkflow, /npm install --global npm@11\.19\.0/)
+  assert.doesNotMatch(releaseWorkflow, /npm install --global npm@latest/)
   assert.match(ciWorkflow, /pnpm\/action-setup@v6/)
   assert.match(releaseWorkflow, /pnpm\/action-setup@v6/)
   assert.doesNotMatch(`${ciWorkflow}\n${releaseWorkflow}`, /pnpm\/action-setup@v4/)
