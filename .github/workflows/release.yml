@@ -31,7 +31,8 @@ jobs:
           version: 11.7.0
       - uses: actions/setup-node@v6
         with:
-          node-version: '24'
+          # semantic-release 25 及其 OIDC 发布插件要求 Node.js >= 24.10。
+          node-version: '24.10.0'
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
       - run: npm install --global npm@latest
