@@ -4,7 +4,7 @@
 
 DingTalk connector for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH). It connects a local DSH Web agent to DingTalk over a Stream connection, without requiring a public inbound endpoint.
 
-> Compatibility: only the latest DSH release is supported. After upgrading DSH, run `doctor` first and report incompatibilities through GitHub Issues.
+> DSH must be installed before setup. Setup keeps an existing DSH version unchanged; after upgrading DSH, run `doctor` first and report incompatibilities through GitHub Issues.
 
 ## Before you start
 
@@ -21,7 +21,7 @@ npx @dingtalk-real-ai/dsh-dingtalk@latest setup
 
 `npx` downloads and runs the CLI for this invocation; it does **not** add `dsh-dingtalk` to your shell's PATH. To reopen setup or run diagnostics later, use the same `npx` form below. If you prefer the shorter `dsh-dingtalk` commands, install the package globally in the optional section.
 
-The guided setup checks or installs the latest DSH, installs this exact plugin version into the `web` profile, creates or configures one or more DingTalk bot accounts, configures optional DWS, image, sender and group access, stores credentials, generates owner-binding codes, and offers to start `dsh web`. New bot accounts default to all senders and all groups.
+The guided setup checks for DSH and installs the latest release only when DSH is absent. It keeps an existing DSH version unchanged, installs this exact plugin version into the `web` profile, creates or configures one or more DingTalk bot accounts, configures optional DWS, image, sender and group access, stores credentials, generates owner-binding codes, and offers to start `dsh web`. New bot accounts default to all senders and all groups.
 
 When DSH Web is ready, send the displayed command to the bot in a direct message:
 

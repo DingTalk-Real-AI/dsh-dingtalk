@@ -68,6 +68,16 @@ class FakeRunner {
   }
 }
 
+class ExistingOlderDshRunner extends FakeRunner {
+  run(command, args) {
+    if (command === 'dsh' && args[0] === '--version') {
+      this.calls.push([command, ...args])
+      return { code: 0, stdout: '0.1.0-rc.7\n', stderr: '' }
+    }
+    return super.run(command, args)
+  }
+}
+
 class OldPnpmRunner extends FakeRunner {
   pnpmChecks = 0
   run(command, args) {
@@ -149,6 +159,37 @@ test('首次 setup 自动安装精确插件版本并完成完整引导', async (
     },
   ])
   assert.match(ui.messages.join('\n'), /input: \[text, image\]/)
+})
+
+test('已有旧版 DSH 时 setup 不检查 latest 或要求升级', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-dingtalk-existing-dsh-'))
+  t.after(() => import('node:fs/promises').then((fs) => fs.rm(root, { recursive: true, force: true })))
+  const ui = new FakeUi({
+    credentialMethod: 'manual',
+    clientId: 'ding-app',
+    clientSecret: 'test-only-secret',
+    startWeb: false,
+  })
+  const runner = new ExistingOlderDshRunner()
+
+  const result = await runGuidedSetup({
+    ui,
+    runner,
+    dshHome: path.join(root, '.dsh'),
+    stateDir: path.join(root, '.dsh-dingtalk'),
+    installSpec: '@dingtalk-real-ai/dsh-dingtalk@0.5.0',
+  })
+
+  assert.equal(result.code, 0)
+  assert.equal(
+    runner.calls.some((call) => call[0] === 'npm' && call[1] === 'view'),
+    false,
+  )
+  assert.equal(ui.confirmMessages.has('updateDsh'), false)
+  assert.deepEqual(
+    runner.calls.find((call) => call[0] === 'dsh' && call[1] === 'plugin'),
+    ['dsh', 'plugin', '--profile', 'web', 'add', '@dingtalk-real-ai/dsh-dingtalk@0.5.0'],
+  )
 })
 
 test('重复 setup 可只修改功能配置并保留现有凭据', async (t) => {

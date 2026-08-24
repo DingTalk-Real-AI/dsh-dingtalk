@@ -93,7 +93,7 @@ function cleanVersion(output: string): string {
   }
 }
 
-async function ensureLatestDsh(ui: SetupUi, runner: CommandRunner): Promise<boolean> {
+async function ensureDshInstalled(ui: SetupUi, runner: CommandRunner): Promise<boolean> {
   let installed = await runWithLoading(ui, runner, '正在检查 DeepSeek Harness…', 'dsh', ['--version'])
   if (installed.code !== 0) {
     if (!(await ui.confirm('installDsh', '未检测到 DeepSeek Harness，是否安装最新版？', true))) return false
@@ -113,38 +113,6 @@ async function ensureLatestDsh(ui: SetupUi, runner: CommandRunner): Promise<bool
     }
   }
 
-  const latest = await runWithLoading(ui, runner, '正在检查 DeepSeek Harness 最新版本…', 'npm', [
-    'view',
-    '@deepseek-ai/dsh',
-    'version',
-    '--json',
-  ])
-  if (latest.code !== 0) {
-    ui.warn('无法连接 NPM 检查 DSH 最新版本；将继续使用当前版本，doctor 会标记为未验证。')
-    return true
-  }
-  const installedVersion = cleanVersion(installed.stdout)
-  const latestVersion = cleanVersion(latest.stdout)
-  if (installedVersion && latestVersion && installedVersion !== latestVersion) {
-    const update = await ui.confirm(
-      'updateDsh',
-      `当前 DSH ${installedVersion}，支持版本为最新的 ${latestVersion}。是否升级？`,
-      true,
-    )
-    if (!update) {
-      ui.warn('当前 DSH 不在第一版支持范围，setup 已停止。')
-      return false
-    }
-    const upgraded = await runWithLoading(ui, runner, '正在升级 DeepSeek Harness…', 'npm', [
-      'install',
-      '--global',
-      `@deepseek-ai/dsh@${latestVersion}`,
-    ])
-    if (upgraded.code !== 0) {
-      ui.warn(`DSH 升级失败：${upgraded.stderr.trim() || 'npm 返回非零状态'}`)
-      return false
-    }
-  }
   return true
 }
 
@@ -432,7 +400,7 @@ export async function runGuidedSetup(options: RunGuidedSetupOptions): Promise<Gu
     ui.warn(`当前 Node.js ${process.versions.node}，要求 ^22.19.0 或 >=24.0.0。`)
     return { code: 2, startWeb: false }
   }
-  if (!(await ensureLatestDsh(ui, runner))) return { code: 2, startWeb: false }
+  if (!(await ensureDshInstalled(ui, runner))) return { code: 2, startWeb: false }
   if (!(await ensurePnpm(ui, runner))) return { code: 2, startWeb: false }
 
   const installed = await runWithLoading(ui, runner, '正在安装 DSH web profile 插件…', 'dsh', [
