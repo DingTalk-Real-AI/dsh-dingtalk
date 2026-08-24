@@ -33,16 +33,7 @@ test('组织公开仓库从 0.5.0 开始通过 Trusted Publisher 发布正式版
   assert.match(releaseWorkflow, /environment: npm-production/)
   assert.match(releaseWorkflow, /BOOTSTRAP_VERSION: '0\.5\.0'/)
   assert.match(releaseWorkflow, /npm publish --access public --tag latest/)
-  assert.match(releaseWorkflow, /gitHead/)
-  assert.match(releaseWorkflow, /dist-tags\.latest/)
-  assert.match(releaseWorkflow, /dist\.attestations\.url/)
-  assert.match(releaseWorkflow, /repository\.url/)
-  assert.match(releaseWorkflow, /gh release view/)
-  assert.match(releaseWorkflow, /cd "\$RUNNER_TEMP"/)
-  assert.match(
-    releaseWorkflow,
-    /npx --yes --registry=https:\/\/registry\.npmjs\.org --package "\$PACKAGE_NAME@\$release_version" dsh-dingtalk --version/,
-  )
+  assert.match(releaseWorkflow, /node scripts\/verify-release\.mjs/)
   assert.match(releaseWorkflow, /already belongs to this commit/)
   assert.doesNotMatch(releaseWorkflow, /NODE_AUTH_TOKEN|NPM_BOOTSTRAP_TOKEN|NPM_CONFIG_PROVENANCE: 'false'/)
 })
