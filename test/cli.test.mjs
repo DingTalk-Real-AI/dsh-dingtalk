@@ -4,6 +4,7 @@ import { spawnSync } from 'node:child_process'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
+import { parse } from 'yaml'
 
 test('公开帮助只推荐正式 latest 安装渠道', () => {
   const result = spawnSync(process.execPath, ['lib/bin.js', '--help'], {
@@ -61,6 +62,13 @@ test('公开 setup CLI 在一个进程内完成插件安装和配置', async (t)
   assert.match(await readFile(log, 'utf8'), /dsh plugin --profile web add/)
   assert.match(result.stdout, /检测到 dsh web 正在运行/)
   assert.doesNotMatch(await readFile(log, 'utf8'), /dsh web/)
+  assert.deepEqual(parse(await readFile(path.join(root, '.dsh', '.credentials.yaml'), 'utf8')), {
+    version: 1,
+    refs: {
+      DINGTALK_CLIENT_ID: 'ding-cli',
+      DINGTALK_CLIENT_SECRET: 'secret-cli',
+    },
+  })
 })
 
 test('doctor 识别 web profile 中显式配置的管理员', async (t) => {
@@ -82,6 +90,35 @@ test('doctor 识别 web profile 中显式配置的管理员', async (t) => {
 
   assert.equal(result.status, 1)
   assert.match(result.stdout, /✅ 唯一管理员：已完成绑定或显式配置/)
+})
+
+test('doctor 读取 DSH v1 凭据文件', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-dingtalk-cli-v1-doctor-'))
+  t.after(() => import('node:fs/promises').then((fs) => fs.rm(root, { recursive: true, force: true })))
+  const dshHome = path.join(root, '.dsh')
+  const profile = path.join(dshHome, 'profiles', 'web')
+  await import('node:fs/promises').then((fs) => fs.mkdir(profile, { recursive: true }))
+  await writeFile(
+    path.join(dshHome, '.credentials.yaml'),
+    ['version: 1', 'refs:', '  DINGTALK_CLIENT_ID: default-app', '  DINGTALK_CLIENT_SECRET: default-secret', ''].join(
+      '\n',
+    ),
+    { mode: 0o600 },
+  )
+  await writeFile(
+    path.join(profile, 'cordis.patch.yml'),
+    '- id: dingtalk-channel\n  config:\n    ownerStaffId: configured-owner\n',
+  )
+
+  const result = spawnSync(process.execPath, ['lib/bin.js', 'doctor', '--offline'], {
+    cwd: path.resolve('.'),
+    encoding: 'utf8',
+    env: { ...process.env, HOME: root, DSH_HOME: dshHome },
+  })
+
+  assert.equal(result.status, 0, result.stderr || result.stdout)
+  assert.match(result.stdout, /⚠️ 应用凭据：已配置，但本次未执行联网验证/)
+  assert.doesNotMatch(result.stderr, /无效条目 version/)
 })
 
 test('doctor 分账号展示多条 Stream 与凭据诊断', async (t) => {

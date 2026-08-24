@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { chmod, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -16,7 +16,7 @@ import {
   updateWebProfileConfig,
 } from '../lib/setup-state.js'
 
-test('setup 将钉钉凭据写入 DSH 凭据存储并保留其他键', async (t) => {
+test('setup 将旧扁平凭据迁移为 DSH v1 并保留其他键', async (t) => {
   const dshHome = await mkdtemp(path.join(os.tmpdir(), 'dsh-dingtalk-credentials-'))
   t.after(() => import('node:fs/promises').then((fs) => fs.rm(dshHome, { recursive: true, force: true })))
   const file = path.join(dshHome, '.credentials.yaml')
@@ -25,9 +25,12 @@ test('setup 将钉钉凭据写入 DSH 凭据存储并保留其他键', async (t)
   await saveDingTalkCredentials(dshHome, { clientId: 'ding-app', clientSecret: 'super-secret' })
 
   assert.deepEqual(parse(await readFile(file, 'utf8')), {
-    OPENAI_API_KEY: 'keep-me',
-    DINGTALK_CLIENT_ID: 'ding-app',
-    DINGTALK_CLIENT_SECRET: 'super-secret',
+    version: 1,
+    refs: {
+      OPENAI_API_KEY: 'keep-me',
+      DINGTALK_CLIENT_ID: 'ding-app',
+      DINGTALK_CLIENT_SECRET: 'super-secret',
+    },
   })
   if (process.platform !== 'win32') assert.equal((await stat(file)).mode & 0o777, 0o600)
   assert.deepEqual(await loadDingTalkCredentials(dshHome), {
@@ -35,6 +38,154 @@ test('setup 将钉钉凭据写入 DSH 凭据存储并保留其他键', async (t)
     clientSecret: 'super-secret',
     source: 'credentials',
   })
+})
+
+test('setup 读写 DSH v1 凭据并保留其他引用、记录与注释', async (t) => {
+  const dshHome = await mkdtemp(path.join(os.tmpdir(), 'dsh-dingtalk-v1-credentials-'))
+  t.after(() => import('node:fs/promises').then((fs) => fs.rm(dshHome, { recursive: true, force: true })))
+  const file = path.join(dshHome, '.credentials.yaml')
+  await writeFile(
+    file,
+    [
+      'version: 1',
+      'refs:',
+      '  OPENAI_API_KEY: keep-me # 保留无关引用',
+      'records:',
+      '  llm-pi-ai/test-route:',
+      '    kind: api-key',
+      '    env:',
+      '      AWS_PROFILE: test-profile # 保留无关记录',
+      '',
+    ].join('\n'),
+    { mode: 0o600 },
+  )
+
+  await saveDingTalkCredentials(dshHome, { clientId: 'ding-app', clientSecret: 'super-secret' })
+
+  const saved = await readFile(file, 'utf8')
+  assert.deepEqual(parse(saved), {
+    version: 1,
+    refs: {
+      OPENAI_API_KEY: 'keep-me',
+      DINGTALK_CLIENT_ID: 'ding-app',
+      DINGTALK_CLIENT_SECRET: 'super-secret',
+    },
+    records: {
+      'llm-pi-ai/test-route': {
+        kind: 'api-key',
+        env: { AWS_PROFILE: 'test-profile' },
+      },
+    },
+  })
+  assert.match(saved, /# 保留无关引用/)
+  assert.match(saved, /# 保留无关记录/)
+  assert.deepEqual(await loadDingTalkCredentials(dshHome), {
+    clientId: 'ding-app',
+    clientSecret: 'super-secret',
+    source: 'credentials',
+  })
+})
+
+test('setup 接受 DSH v1 的空章节并保留空 records', async (t) => {
+  const dshHome = await mkdtemp(path.join(os.tmpdir(), 'dsh-dingtalk-null-credentials-'))
+  t.after(() => import('node:fs/promises').then((fs) => fs.rm(dshHome, { recursive: true, force: true })))
+  const file = path.join(dshHome, '.credentials.yaml')
+  await writeFile(file, 'version: 1\nrefs: # 用户说明\nrecords:\n', { mode: 0o600 })
+
+  await saveDingTalkCredentials(dshHome, { clientId: 'ding-app', clientSecret: 'super-secret' })
+
+  const saved = await readFile(file, 'utf8')
+  assert.deepEqual(parse(saved), {
+    version: 1,
+    refs: {
+      DINGTALK_CLIENT_ID: 'ding-app',
+      DINGTALK_CLIENT_SECRET: 'super-secret',
+    },
+    records: null,
+  })
+  assert.match(saved, /refs:\n  # 用户说明\n/)
+})
+
+test('setup 从仅含注释的凭据文件初始化时保留文档注释', async (t) => {
+  const dshHome = await mkdtemp(path.join(os.tmpdir(), 'dsh-dingtalk-comment-credentials-'))
+  t.after(() => import('node:fs/promises').then((fs) => fs.rm(dshHome, { recursive: true, force: true })))
+  const file = path.join(dshHome, '.credentials.yaml')
+  await writeFile(file, '# 由用户管理的凭据\n', { mode: 0o600 })
+
+  await saveDingTalkCredentials(dshHome, { clientId: 'ding-app', clientSecret: 'super-secret' })
+
+  assert.match(await readFile(file, 'utf8'), /^# 由用户管理的凭据\n/)
+})
+
+test('setup 遇到 DSH 无法读取的 record 时安全退出且不改写文件', async (t) => {
+  const dshHome = await mkdtemp(path.join(os.tmpdir(), 'dsh-dingtalk-invalid-record-'))
+  t.after(() => import('node:fs/promises').then((fs) => fs.rm(dshHome, { recursive: true, force: true })))
+  const file = path.join(dshHome, '.credentials.yaml')
+  const original = [
+    'version: 1',
+    'refs:',
+    '  OPENAI_API_KEY: keep-me',
+    'records:',
+    '  llm-pi-ai/test-route:',
+    '    kind: api-key',
+    '    typo: must-not-be-dropped',
+    '',
+  ].join('\n')
+  await writeFile(file, original, { mode: 0o600 })
+
+  await assert.rejects(
+    () => saveDingTalkCredentials(dshHome, { clientId: 'ding-app', clientSecret: 'super-secret' }),
+    /record llm-pi-ai\/test-route 包含未知字段 typo/,
+  )
+
+  assert.equal(await readFile(file, 'utf8'), original)
+  await assert.rejects(() => stat(`${file}.lock`), { code: 'ENOENT' })
+})
+
+test('setup 与 DSH 并发写入时等待共享锁并合并最新引用', async (t) => {
+  const dshHome = await mkdtemp(path.join(os.tmpdir(), 'dsh-dingtalk-locked-credentials-'))
+  t.after(() => import('node:fs/promises').then((fs) => fs.rm(dshHome, { recursive: true, force: true })))
+  const file = path.join(dshHome, '.credentials.yaml')
+  const lock = `${file}.lock`
+  await writeFile(file, 'version: 1\nrefs:\n  OPENAI_API_KEY: before\n', { mode: 0o600 })
+  await writeFile(lock, 'test-writer\n', { mode: 0o600 })
+
+  const saving = saveDingTalkCredentials(dshHome, { clientId: 'ding-app', clientSecret: 'super-secret' })
+  const finishedBeforeUnlock = await Promise.race([
+    saving.then(() => true),
+    new Promise((resolve) => setTimeout(() => resolve(false), 50)),
+  ])
+  assert.equal(finishedBeforeUnlock, false)
+
+  await writeFile(file, 'version: 1\nrefs:\n  OPENAI_API_KEY: after\n  CONCURRENT_KEY: keep-me\n', { mode: 0o600 })
+  await rm(lock)
+  await saving
+
+  assert.deepEqual(parse(await readFile(file, 'utf8')), {
+    version: 1,
+    refs: {
+      OPENAI_API_KEY: 'after',
+      CONCURRENT_KEY: 'keep-me',
+      DINGTALK_CLIENT_ID: 'ding-app',
+      DINGTALK_CLIENT_SECRET: 'super-secret',
+    },
+  })
+})
+
+test('setup 遇到未知 DSH 凭据版本时安全退出且不改写文件', async (t) => {
+  const dshHome = await mkdtemp(path.join(os.tmpdir(), 'dsh-dingtalk-future-credentials-'))
+  t.after(() => import('node:fs/promises').then((fs) => fs.rm(dshHome, { recursive: true, force: true })))
+  const file = path.join(dshHome, '.credentials.yaml')
+  const original = 'version: 2\nrefs:\n  OPENAI_API_KEY: keep-me\n'
+  await writeFile(file, original, { mode: 0o600 })
+
+  await assert.rejects(
+    () => saveDingTalkCredentials(dshHome, { clientId: 'ding-app', clientSecret: 'super-secret' }),
+    /使用不受支持的版本 2/,
+  )
+
+  assert.equal(await readFile(file, 'utf8'), original)
+  await assert.rejects(() => stat(`${file}.lock`), { code: 'ENOENT' })
 })
 
 test('setup 拒绝读取权限过宽的凭据文件', async (t) => {
@@ -101,10 +252,13 @@ test('多个钉钉账号使用独立凭据引用且不会覆盖默认账号', as
   assert.equal((await loadDingTalkAccountCredentials(dshHome, 'default'))?.clientId, 'default-app')
   assert.equal((await loadDingTalkAccountCredentials(dshHome, 'support-bot'))?.clientId, 'support-app')
   assert.deepEqual(parse(await readFile(path.join(dshHome, '.credentials.yaml'), 'utf8')), {
-    DINGTALK_CLIENT_ID: 'default-app',
-    DINGTALK_CLIENT_SECRET: 'default-secret',
-    DINGTALK_ACCOUNT_SUPPORT_BOT_CLIENT_ID: 'support-app',
-    DINGTALK_ACCOUNT_SUPPORT_BOT_CLIENT_SECRET: 'support-secret',
+    version: 1,
+    refs: {
+      DINGTALK_CLIENT_ID: 'default-app',
+      DINGTALK_CLIENT_SECRET: 'default-secret',
+      DINGTALK_ACCOUNT_SUPPORT_BOT_CLIENT_ID: 'support-app',
+      DINGTALK_ACCOUNT_SUPPORT_BOT_CLIENT_SECRET: 'support-secret',
+    },
   })
 })
 
