@@ -4,7 +4,7 @@
 
 面向 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）的钉钉连接器。它通过免公网入口的 Stream 长连接，把本机 DSH Web Agent 接入钉钉。
 
-> 兼容范围：当前只保证兼容最新版 DSH。升级 DSH 后如遇到问题，请先运行 `doctor` 并通过 GitHub Issue 反馈。
+> 使用 setup 前需要已安装 DSH。setup 会保留已安装的 DSH 版本不变；升级 DSH 后如遇到问题，请先运行 `doctor` 并通过 GitHub Issue 反馈。
 
 ## 开始前先了解两件事
 
@@ -22,7 +22,7 @@ npx @dingtalk-real-ai/dsh-dingtalk@latest setup
 引导程序会依次完成：
 
 ```text
-检查或安装最新版 DSH
+检查 DSH；仅在未安装时安装最新版
 → 把当前精确版本插件安装到 web profile
 → 扫码创建钉钉应用，或填写已有凭据
 → 可继续新增其他钉钉机器人
