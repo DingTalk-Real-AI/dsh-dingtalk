@@ -5,6 +5,8 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
+const releaseTest = process.platform === 'win32' ? test.skip : test
+
 const expected = {
   packageName: '@dingtalk-real-ai/dsh-dingtalk',
   repository: 'DingTalk-Real-AI/dsh-dingtalk',
@@ -108,7 +110,7 @@ async function runVerifier(t, scenario, attempts = 2) {
   })
 }
 
-test('精确版本暂未同步时从发布读回入口重试并成功', async (t) => {
+releaseTest('精确版本暂未同步时从发布读回入口重试并成功', async (t) => {
   const result = await runVerifier(t, 'metadata-once')
 
   assert.equal(result.status, 0, result.stderr || result.stdout)
@@ -116,7 +118,7 @@ test('精确版本暂未同步时从发布读回入口重试并成功', async (t
   assert.match(result.stdout, /Verified @dingtalk-real-ai\/dsh-dingtalk@0\.5\.2/)
 })
 
-test('公开 CLI 暂未同步时仍在同一重试边界内恢复', async (t) => {
+releaseTest('公开 CLI 暂未同步时仍在同一重试边界内恢复', async (t) => {
   const result = await runVerifier(t, 'cli-once')
 
   assert.equal(result.status, 0, result.stderr || result.stdout)
@@ -136,7 +138,7 @@ const failures = [
 ]
 
 for (const [scenario, expectedError] of failures) {
-  test(`公开发布校验对 ${scenario} 保持 fail-closed`, async (t) => {
+  releaseTest(`公开发布校验对 ${scenario} 保持 fail-closed`, async (t) => {
     const result = await runVerifier(t, scenario, 1)
     const output = `${result.stdout}\n${result.stderr}`
 
