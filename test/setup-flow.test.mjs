@@ -6,7 +6,7 @@ import test from 'node:test'
 import { parse } from 'yaml'
 
 import { issueBindingChallenge } from '../lib/owner.js'
-import { runGuidedSetup } from '../lib/setup.js'
+import { credentialLayoutForDshVersion, runGuidedSetup } from '../lib/setup.js'
 import {
   saveDingTalkAccountCredentials,
   saveDingTalkCredentials,
@@ -94,6 +94,57 @@ class OldPnpmRunner extends FakeRunner {
   }
 }
 
+class SwitchingDshRunner extends FakeRunner {
+  dshChecks = 0
+  run(command, args) {
+    if (command === 'dsh' && args[0] === '--version') {
+      this.calls.push([command, ...args])
+      this.dshChecks += 1
+      return { code: 0, stdout: `${this.dshChecks >= 3 ? '0.1.1-rc.1' : '0.1.0-rc.7'}\n`, stderr: '' }
+    }
+    return super.run(command, args)
+  }
+}
+
+test('setup 按实际 DSH 版本选择凭据文档格式', () => {
+  assert.equal(credentialLayoutForDshVersion('0.1.0-rc.5'), 'flat')
+  assert.equal(credentialLayoutForDshVersion('0.1.0-rc.7'), 'flat')
+  assert.equal(credentialLayoutForDshVersion('0.1.0-rc.8'), 'flat')
+  assert.equal(credentialLayoutForDshVersion('0.1.1-rc.1'), 'v1')
+  assert.equal(credentialLayoutForDshVersion('0.1.1'), 'v1')
+  assert.equal(credentialLayoutForDshVersion('1.0.0'), 'v1')
+  assert.throws(() => credentialLayoutForDshVersion('not-a-version'), /无法识别 DSH 版本/)
+})
+
+test('setup 在交互完成后的实际写入点重新探测 DSH 版本', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-dingtalk-switching-dsh-'))
+  t.after(() => import('node:fs/promises').then((fs) => fs.rm(root, { recursive: true, force: true })))
+  const dshHome = path.join(root, '.dsh')
+  const runner = new SwitchingDshRunner()
+
+  const result = await runGuidedSetup({
+    ui: new FakeUi({
+      credentialMethod: 'manual',
+      clientId: 'ding-app',
+      clientSecret: 'test-only-secret',
+      startWeb: false,
+    }),
+    runner,
+    dshHome,
+    stateDir: path.join(root, '.dsh-dingtalk'),
+    installSpec: '@dingtalk-real-ai/dsh-dingtalk@0.5.0',
+  })
+
+  assert.equal(result.code, 0)
+  assert.deepEqual(parse(await readFile(path.join(dshHome, '.credentials.yaml'), 'utf8')), {
+    version: 1,
+    refs: {
+      DINGTALK_CLIENT_ID: 'ding-app',
+      DINGTALK_CLIENT_SECRET: 'test-only-secret',
+    },
+  })
+})
+
 test('首次 setup 自动安装精确插件版本并完成完整引导', async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-dingtalk-setup-'))
   t.after(() => import('node:fs/promises').then((fs) => fs.rm(root, { recursive: true, force: true })))
@@ -133,11 +184,8 @@ test('首次 setup 自动安装精确插件版本并完成完整引导', async (
   assert.doesNotMatch(ui.messages.join('\n'), /super-secret/)
   assert.doesNotMatch(ui.prompted.join(','), /interactionCardTemplateId/)
   assert.deepEqual(parse(await readFile(path.join(dshHome, '.credentials.yaml'), 'utf8')), {
-    version: 1,
-    refs: {
-      DINGTALK_CLIENT_ID: 'ding-app',
-      DINGTALK_CLIENT_SECRET: 'super-secret',
-    },
+    DINGTALK_CLIENT_ID: 'ding-app',
+    DINGTALK_CLIENT_SECRET: 'super-secret',
   })
   assert.deepEqual(parse(await readFile(path.join(dshHome, 'profiles', 'web', 'cordis.patch.yml'), 'utf8')), [
     {
@@ -193,6 +241,10 @@ test('已有旧版 DSH 时 setup 不检查 latest 或要求升级', async (t) =>
     runner.calls.find((call) => call[0] === 'dsh' && call[1] === 'plugin'),
     ['dsh', 'plugin', '--profile', 'web', 'add', '@dingtalk-real-ai/dsh-dingtalk@0.5.0'],
   )
+  assert.deepEqual(parse(await readFile(path.join(root, '.dsh', '.credentials.yaml'), 'utf8')), {
+    DINGTALK_CLIENT_ID: 'ding-app',
+    DINGTALK_CLIENT_SECRET: 'test-only-secret',
+  })
 })
 
 test('重复 setup 可只修改功能配置并保留现有凭据', async (t) => {
@@ -200,7 +252,11 @@ test('重复 setup 可只修改功能配置并保留现有凭据', async (t) => 
   t.after(() => import('node:fs/promises').then((fs) => fs.rm(root, { recursive: true, force: true })))
   const dshHome = path.join(root, '.dsh')
   const stateDir = path.join(root, '.dsh-dingtalk')
-  await saveDingTalkCredentials(dshHome, { clientId: 'existing-id', clientSecret: 'existing-secret' })
+  await saveDingTalkCredentials(
+    dshHome,
+    { clientId: 'existing-id', clientSecret: 'existing-secret' },
+    { layout: 'flat' },
+  )
   await updateWebProfileConfig(dshHome, {
     dwsEnabled: false,
     imageMode: 'auto',
@@ -228,11 +284,8 @@ test('重复 setup 可只修改功能配置并保留现有凭据', async (t) => 
   assert.equal(result.code, 0)
   assert.match(ui.confirmMessages.get('startWeb'), /\/bind/)
   assert.deepEqual(parse(await readFile(path.join(dshHome, '.credentials.yaml'), 'utf8')), {
-    version: 1,
-    refs: {
-      DINGTALK_CLIENT_ID: 'existing-id',
-      DINGTALK_CLIENT_SECRET: 'existing-secret',
-    },
+    DINGTALK_CLIENT_ID: 'existing-id',
+    DINGTALK_CLIENT_SECRET: 'existing-secret',
   })
   assert.match(ui.messages.join('\n'), /机器人 default 的一次性管理员绑定口令/)
   assert.deepEqual(parse(await readFile(path.join(dshHome, 'profiles', 'web', 'cordis.patch.yml'), 'utf8')), [
@@ -265,7 +318,11 @@ test('修改功能配置不会使仍有效的机器人绑定口令失效', async
   t.after(() => import('node:fs/promises').then((fs) => fs.rm(root, { recursive: true, force: true })))
   const dshHome = path.join(root, '.dsh')
   const stateDir = path.join(root, '.dsh-dingtalk')
-  await saveDingTalkCredentials(dshHome, { clientId: 'existing-id', clientSecret: 'existing-secret' })
+  await saveDingTalkCredentials(
+    dshHome,
+    { clientId: 'existing-id', clientSecret: 'existing-secret' },
+    { layout: 'flat' },
+  )
   await upsertWebProfileAccount(dshHome, 'default')
   const ownerFile = path.join(stateDir, 'owner.json')
   issueBindingChallenge(ownerFile, 10 * 60_000)
@@ -291,7 +348,7 @@ test('重复 setup 可新增第二个机器人账号且不覆盖默认账号', a
   t.after(() => import('node:fs/promises').then((fs) => fs.rm(root, { recursive: true, force: true })))
   const dshHome = path.join(root, '.dsh')
   const stateDir = path.join(root, '.dsh-dingtalk')
-  await saveDingTalkCredentials(dshHome, { clientId: 'default-id', clientSecret: 'default-secret' })
+  await saveDingTalkCredentials(dshHome, { clientId: 'default-id', clientSecret: 'default-secret' }, { layout: 'flat' })
   await upsertWebProfileAccount(dshHome, 'default')
   const ui = new FakeUi({
     setupAction: 'add-account',
@@ -312,13 +369,10 @@ test('重复 setup 可新增第二个机器人账号且不覆盖默认账号', a
 
   assert.equal(result.code, 0)
   assert.deepEqual(parse(await readFile(path.join(dshHome, '.credentials.yaml'), 'utf8')), {
-    version: 1,
-    refs: {
-      DINGTALK_CLIENT_ID: 'default-id',
-      DINGTALK_CLIENT_SECRET: 'default-secret',
-      DINGTALK_ACCOUNT_SUPPORT_BOT_CLIENT_ID: 'support-id',
-      DINGTALK_ACCOUNT_SUPPORT_BOT_CLIENT_SECRET: 'support-secret',
-    },
+    DINGTALK_CLIENT_ID: 'default-id',
+    DINGTALK_CLIENT_SECRET: 'default-secret',
+    DINGTALK_ACCOUNT_SUPPORT_BOT_CLIENT_ID: 'support-id',
+    DINGTALK_ACCOUNT_SUPPORT_BOT_CLIENT_SECRET: 'support-secret',
   })
   const profile = parse(await readFile(path.join(dshHome, 'profiles', 'web', 'cordis.patch.yml'), 'utf8'))
   assert.deepEqual(
@@ -349,12 +403,14 @@ test('绑定菜单按机器人展示绑定状态，并一次生成所有已启�
   t.after(() => import('node:fs/promises').then((fs) => fs.rm(root, { recursive: true, force: true })))
   const dshHome = path.join(root, '.dsh')
   const stateDir = path.join(root, '.dsh-dingtalk')
-  await saveDingTalkCredentials(dshHome, { clientId: 'default-id', clientSecret: 'default-secret' })
+  await saveDingTalkCredentials(dshHome, { clientId: 'default-id', clientSecret: 'default-secret' }, { layout: 'flat' })
   await upsertWebProfileAccount(dshHome, 'default')
-  await saveDingTalkAccountCredentials(dshHome, 'support-bot', {
-    clientId: 'support-id',
-    clientSecret: 'support-secret',
-  })
+  await saveDingTalkAccountCredentials(
+    dshHome,
+    'support-bot',
+    { clientId: 'support-id', clientSecret: 'support-secret' },
+    { layout: 'flat' },
+  )
   await upsertWebProfileAccount(dshHome, 'support-bot')
   await import('node:fs/promises').then((fs) => fs.mkdir(stateDir, { recursive: true }))
   await import('node:fs/promises').then((fs) =>
@@ -387,12 +443,14 @@ test('setup 菜单中的只读诊断按账号展示结果', async (t) => {
   t.after(() => import('node:fs/promises').then((fs) => fs.rm(root, { recursive: true, force: true })))
   const dshHome = path.join(root, '.dsh')
   const stateDir = path.join(root, '.dsh-dingtalk')
-  await saveDingTalkCredentials(dshHome, { clientId: 'default-id', clientSecret: 'default-secret' })
+  await saveDingTalkCredentials(dshHome, { clientId: 'default-id', clientSecret: 'default-secret' }, { layout: 'flat' })
   await upsertWebProfileAccount(dshHome, 'default')
-  await saveDingTalkAccountCredentials(dshHome, 'support-bot', {
-    clientId: 'support-id',
-    clientSecret: 'support-secret',
-  })
+  await saveDingTalkAccountCredentials(
+    dshHome,
+    'support-bot',
+    { clientId: 'support-id', clientSecret: 'support-secret' },
+    { layout: 'flat' },
+  )
   await upsertWebProfileAccount(dshHome, 'support-bot')
   const ui = new FakeUi({ setupAction: 'doctor' })
 

@@ -10,12 +10,13 @@ import {
   loadDingTalkCredentials,
   loadDingTalkAccountCredentials,
   loadWebProfileConfig,
+  reconcileDingTalkCredentialLayout,
   removeLegacyDingTalkCredentials,
   saveDingTalkAccountCredentials,
-  saveDingTalkCredentials,
   upsertWebProfileAccount,
   updateWebProfileAccountAccess,
   updateWebProfileConfig,
+  type CredentialDocumentLayout,
   type DingTalkCredentials,
   type GroupAccess,
   type ImageMode,
@@ -105,6 +106,64 @@ function cleanVersion(output: string): string {
   }
 }
 
+interface ParsedSemver {
+  core: [number, number, number]
+  prerelease: Array<number | string> | null
+}
+
+function parseSemver(value: string): ParsedSemver | undefined {
+  const match = value.match(/^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/u)
+  if (!match) return undefined
+  return {
+    core: [Number(match[1]), Number(match[2]), Number(match[3])],
+    prerelease: match[4] ? match[4].split('.').map((part) => (/^\d+$/u.test(part) ? Number(part) : part)) : null,
+  }
+}
+
+function compareSemver(left: ParsedSemver, right: ParsedSemver): number {
+  for (let index = 0; index < left.core.length; index += 1) {
+    if (left.core[index] !== right.core[index]) return left.core[index] < right.core[index] ? -1 : 1
+  }
+  if (left.prerelease === null || right.prerelease === null) {
+    if (left.prerelease === right.prerelease) return 0
+    return left.prerelease === null ? 1 : -1
+  }
+  const length = Math.max(left.prerelease.length, right.prerelease.length)
+  for (let index = 0; index < length; index += 1) {
+    const leftPart = left.prerelease[index]
+    const rightPart = right.prerelease[index]
+    if (leftPart === undefined || rightPart === undefined) {
+      if (leftPart === rightPart) return 0
+      return leftPart === undefined ? -1 : 1
+    }
+    if (leftPart === rightPart) continue
+    if (typeof leftPart === 'number' && typeof rightPart === 'string') return -1
+    if (typeof leftPart === 'string' && typeof rightPart === 'number') return 1
+    return leftPart < rightPart ? -1 : 1
+  }
+  return 0
+}
+
+const FIRST_VERSIONED_CREDENTIAL_DSH = parseSemver('0.1.1-rc.1') as ParsedSemver
+
+export function credentialLayoutForDshVersion(version: string): CredentialDocumentLayout {
+  const parsed = parseSemver(version)
+  if (!parsed) throw new Error(`无法识别 DSH 版本 ${version || '(empty)'}，已停止写入凭据`)
+  return compareSemver(parsed, FIRST_VERSIONED_CREDENTIAL_DSH) < 0 ? 'flat' : 'v1'
+}
+
+function installedDshCredentialLayout(runner: CommandRunner): CredentialDocumentLayout {
+  let result: CommandResult
+  try {
+    result = runner.run('dsh', ['--version'])
+  } catch {
+    throw new Error('无法确认当前 PATH 中的 DSH 版本，已停止写入凭据')
+  }
+  const version = result.code === 0 ? cleanVersion(result.stdout) : ''
+  if (!version) throw new Error('无法确认当前 PATH 中的 DSH 版本，已停止写入凭据')
+  return credentialLayoutForDshVersion(version)
+}
+
 async function ensureDshInstalled(ui: SetupUi, runner: CommandRunner): Promise<boolean> {
   let installed = await runWithLoading(ui, runner, '正在检查 DeepSeek Harness…', 'dsh', ['--version'])
   if (installed.code !== 0) {
@@ -175,7 +234,8 @@ async function configureCredentials(options: RunGuidedSetupOptions, accountId: s
   if (accountId === DEFAULT_ACCOUNT_ID && current?.source === 'legacy-env') {
     const migrate = await ui.confirm('migrateLegacy', '检测到 ~/.dsh/.env 中的旧凭据，是否迁移到 DSH 凭据存储？', true)
     if (migrate) {
-      await saveDingTalkAccountCredentials(dshHome, accountId, current, credentialRefs)
+      const layout = installedDshCredentialLayout(options.runner)
+      await saveDingTalkAccountCredentials(dshHome, accountId, current, { layout, credentialRefs })
       await removeLegacyDingTalkCredentials(dshHome)
       ui.success('旧凭据已迁移，普通 .env 中的钉钉凭据已移除。')
       return true
@@ -198,7 +258,8 @@ async function configureCredentials(options: RunGuidedSetupOptions, accountId: s
           clientId: (await ui.text('clientId', 'Client ID（AppKey）')).trim(),
           clientSecret: (await ui.secret('clientSecret', 'Client Secret（AppSecret）')).trim(),
         }
-  await saveDingTalkAccountCredentials(dshHome, accountId, credentials, credentialRefs)
+  const layout = installedDshCredentialLayout(options.runner)
+  await saveDingTalkAccountCredentials(dshHome, accountId, credentials, { layout, credentialRefs })
   await upsertWebProfileAccount(dshHome, accountId)
   ui.success(`钉钉机器人 ${accountId} 的应用凭据已安全写入 DSH 凭据存储。`)
   return true
@@ -372,6 +433,9 @@ export async function runPrivateAccountSetup(
   options: RunPrivateAccountSetupOptions,
 ): Promise<PrivateAccountSetupResult> {
   const accountId = assertAccountId(options.accountId)
+  const credentialLayout = installedDshCredentialLayout(options.runner)
+  const layoutChanged = await reconcileDingTalkCredentialLayout(options.dshHome, credentialLayout)
+  if (layoutChanged) options.ui.success('DSH 凭据文档已转换为当前安装可读取的格式。')
   let profile = await loadWebProfileConfig(options.dshHome)
   let account = profile.accounts.find((item) => item.id === accountId)
   let credentials = await loadDingTalkAccountCredentials(options.dshHome, accountId, account)
@@ -537,6 +601,9 @@ export async function runGuidedSetup(options: RunGuidedSetupOptions): Promise<Gu
     await showOfflineDoctor(options)
     return { code: 0, startWeb: false, runDoctor: true }
   }
+  const credentialLayout = installedDshCredentialLayout(runner)
+  const layoutChanged = await reconcileDingTalkCredentialLayout(dshHome, credentialLayout)
+  if (layoutChanged) ui.success('DSH 凭据文档已转换为当前安装可读取的格式。')
   let selectedRobot = DEFAULT_ACCOUNT_ID
   const bindingPrepared = new Set<string>()
   if (action === 'add-account') {

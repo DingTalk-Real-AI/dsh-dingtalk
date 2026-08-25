@@ -93,8 +93,16 @@ async function assertPrivateFile(file: string): Promise<void> {
 
 interface CredentialDocument {
   refs: Record<string, string>
+  layoutChanged: boolean
   setRef(key: string, value: string): void
   serialize(): string
+}
+
+export type CredentialDocumentLayout = 'flat' | 'v1'
+
+export interface SaveDingTalkCredentialOptions {
+  layout: CredentialDocumentLayout
+  credentialRefs?: AccountCredentialRefs
 }
 
 function validateCredentialRefs(value: unknown, file: string): Record<string, string> {
@@ -182,7 +190,11 @@ function validateCredentialRecords(value: unknown, file: string): void {
   }
 }
 
-function parseCredentialDocument(source: string | undefined, file: string): CredentialDocument {
+function parseCredentialDocument(
+  source: string | undefined,
+  file: string,
+  targetLayout?: CredentialDocumentLayout,
+): CredentialDocument {
   let document = parseDocument(source ?? '', { uniqueKeys: true })
   if (document.errors.length) {
     throw new Error(`凭据文件 ${file} 不是有效的 YAML 文档`)
@@ -190,15 +202,17 @@ function parseCredentialDocument(source: string | undefined, file: string): Cred
 
   let refsNode: YAMLMap
   let refs: Record<string, string>
+  let layoutChanged = false
   if (document.contents === null) {
     const commentBefore = document.commentBefore
     const comment = document.comment
-    document = parseDocument('version: 1\nrefs: {}\n', { uniqueKeys: true })
+    const layout = targetLayout ?? 'flat'
+    document = parseDocument(layout === 'v1' ? 'version: 1\nrefs: {}\n' : '{}\n', { uniqueKeys: true })
     document.commentBefore = commentBefore
     document.comment = comment
-    const createdRefs = document.get('refs', true)
-    if (!isMap(createdRefs)) throw new Error(`无法初始化凭据文件 ${file}`)
-    refsNode = createdRefs
+    const initializedRefs = layout === 'v1' ? document.get('refs', true) : document.contents
+    if (!isMap(initializedRefs)) throw new Error(`无法初始化凭据文件 ${file}`)
+    refsNode = initializedRefs
     refs = {}
   } else {
     if (!isMap(document.contents)) throw new Error(`凭据文件 ${file} 必须是 YAML mapping`)
@@ -213,31 +227,63 @@ function parseCredentialDocument(source: string | undefined, file: string): Cred
       validateCredentialRecords(value.records, file)
       refs = validateCredentialRefs(value.refs, file)
       const currentRefs = document.get('refs', true)
-      if (value.refs === undefined || value.refs === null) {
-        const createdMap = new YAMLMap()
-        const currentComment = (currentRefs as { comment?: unknown } | undefined)?.comment
-        if (typeof currentComment === 'string') createdMap.commentBefore = currentComment
-        document.set('refs', createdMap)
-        const createdRefs = document.get('refs', true)
-        if (!isMap(createdRefs)) throw new Error(`无法初始化凭据文件 ${file} 的 refs`)
-        refsNode = createdRefs
+      const records = value.records as Record<string, unknown> | null | undefined
+      const hasRecords = records !== undefined && records !== null && Object.keys(records).length > 0
+      if (targetLayout === 'flat') {
+        if (hasRecords) {
+          throw new Error(`凭据文件 ${file} 包含 records，无法安全转换为旧版 DSH 的扁平格式；请先升级 DSH`)
+        }
+        const root = document.contents
+        if (isMap(currentRefs)) {
+          root.items = currentRefs.items as typeof root.items
+          if (currentRefs.commentBefore) root.commentBefore = currentRefs.commentBefore
+          if (currentRefs.comment) root.comment = currentRefs.comment
+        } else {
+          root.items = []
+          const currentComment = (currentRefs as { comment?: unknown } | undefined)?.comment
+          if (typeof currentComment === 'string') root.commentBefore = currentComment
+        }
+        refsNode = root
+        layoutChanged = true
       } else {
-        if (!isMap(currentRefs)) throw new Error(`凭据文件 ${file} 的 refs 必须是 YAML mapping`)
-        refsNode = currentRefs
+        if (value.refs === undefined || value.refs === null) {
+          const createdMap = new YAMLMap()
+          const currentComment = (currentRefs as { comment?: unknown } | undefined)?.comment
+          if (typeof currentComment === 'string') createdMap.commentBefore = currentComment
+          document.set('refs', createdMap)
+          const createdRefs = document.get('refs', true)
+          if (!isMap(createdRefs)) throw new Error(`无法初始化凭据文件 ${file} 的 refs`)
+          refsNode = createdRefs
+        } else {
+          if (!isMap(currentRefs)) throw new Error(`凭据文件 ${file} 的 refs 必须是 YAML mapping`)
+          refsNode = currentRefs
+        }
       }
     } else {
       refs = validateCredentialRefs(value, file)
-      const legacyRefs = document.contents
-      document = parseDocument('version: 1\nrefs: {}\n', { uniqueKeys: true })
-      document.set('refs', legacyRefs)
-      const migratedRefs = document.get('refs', true)
-      if (!isMap(migratedRefs)) throw new Error(`无法迁移凭据文件 ${file}`)
-      refsNode = migratedRefs
+      if (targetLayout === 'v1') {
+        const legacyRoot = document.contents
+        const commentBefore = document.commentBefore
+        const comment = document.comment
+        document = parseDocument('version: 1\nrefs: {}\n', { uniqueKeys: true })
+        document.commentBefore = commentBefore
+        document.comment = comment
+        const versionedRefs = document.get('refs', true)
+        if (!isMap(versionedRefs)) throw new Error(`无法初始化凭据文件 ${file} 的 refs`)
+        versionedRefs.items = legacyRoot.items
+        if (legacyRoot.commentBefore) versionedRefs.commentBefore = legacyRoot.commentBefore
+        if (legacyRoot.comment) versionedRefs.comment = legacyRoot.comment
+        refsNode = versionedRefs
+        layoutChanged = true
+      } else {
+        refsNode = document.contents
+      }
     }
   }
 
   return {
     refs,
+    layoutChanged,
     setRef(key, value) {
       refsNode.set(key, value)
     },
@@ -344,29 +390,46 @@ export async function loadDingTalkAccountCredentials(
 export async function saveDingTalkCredentials(
   dshHome: string,
   credentials: Pick<DingTalkCredentials, 'clientId' | 'clientSecret'>,
+  options: Pick<SaveDingTalkCredentialOptions, 'layout'>,
 ): Promise<string> {
-  return saveDingTalkAccountCredentials(dshHome, 'default', credentials)
+  return saveDingTalkAccountCredentials(dshHome, 'default', credentials, options)
 }
 
 export async function saveDingTalkAccountCredentials(
   dshHome: string,
   accountId: string,
   credentials: Pick<DingTalkCredentials, 'clientId' | 'clientSecret'>,
-  credentialRefs: AccountCredentialRefs = accountCredentialRefs(accountId),
+  options: SaveDingTalkCredentialOptions,
 ): Promise<string> {
   if (!credentials.clientId.trim() || !credentials.clientSecret.trim())
     throw new Error('Client ID 和 Client Secret 不能为空')
-  const refs = credentialRefs
+  const refs = options.credentialRefs ?? accountCredentialRefs(accountId)
   assertAccountCredentialRefs(refs)
   const file = credentialsPath(dshHome)
   return withCredentialFileLock(file, async () => {
     const existing = await readOptional(file)
     if (existing !== undefined) await assertPrivateFile(file)
-    const document = parseCredentialDocument(existing, file)
+    const document = parseCredentialDocument(existing, file, options.layout)
     document.setRef(refs.clientIdRef, credentials.clientId.trim())
     document.setRef(refs.clientSecretRef, credentials.clientSecret.trim())
     await atomicPrivateWrite(file, document.serialize())
     return file
+  })
+}
+
+export async function reconcileDingTalkCredentialLayout(
+  dshHome: string,
+  layout: CredentialDocumentLayout,
+): Promise<boolean> {
+  const file = credentialsPath(dshHome)
+  return withCredentialFileLock(file, async () => {
+    const existing = await readOptional(file)
+    if (existing === undefined) return false
+    await assertPrivateFile(file)
+    const document = parseCredentialDocument(existing, file, layout)
+    if (!document.layoutChanged) return false
+    await atomicPrivateWrite(file, document.serialize())
+    return true
   })
 }
 

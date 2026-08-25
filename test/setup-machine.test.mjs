@@ -3,6 +3,7 @@ import { chmod, mkdir, mkdtemp, readFile, stat, writeFile } from 'node:fs/promis
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
+import { parse } from 'yaml'
 
 import {
   applyMachineSetup,
@@ -208,6 +209,10 @@ test('私密 resume 仅在终端展示凭据和绑定口令，机器 resume 可�
   })
 
   assert.equal(privateResult.status, 'awaiting_bind')
+  assert.deepEqual(parse(await readFile(path.join(setupOptions.dshHome, '.credentials.yaml'), 'utf8')), {
+    DINGTALK_CLIENT_ID: 'private-app',
+    DINGTALK_CLIENT_SECRET: 'private-secret',
+  })
   const displayed = ui.messages.join('\n')
   const code = displayed.match(/\/bind ([A-Z0-9]+)/)?.[1]
   assert.ok(code)
@@ -247,6 +252,36 @@ test('私密 resume 仅在终端展示凭据和绑定口令，机器 resume 可�
   const completed = await resumeMachineSetup({ ...setupOptions, serviceStatus: 'running' }, first.checkpointId)
   assert.equal(completed.status, 'completed')
   assert.equal(completed.next, undefined)
+})
+
+test('私密 resume 在已有凭据早退前修复当前 DSH 不可读的文档格式', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-dingtalk-machine-repair-credentials-'))
+  t.after(() => import('node:fs/promises').then((fs) => fs.rm(root, { recursive: true, force: true })))
+  const runner = new FakeRunner()
+  const setupOptions = options(root, runner)
+  const plan = await planMachineSetup(setupOptions, { accountId: 'default' })
+  const first = await applyMachineSetup(setupOptions, answers(plan.planId))
+  const credentialsFile = path.join(setupOptions.dshHome, '.credentials.yaml')
+  await writeFile(
+    credentialsFile,
+    'version: 1\nrefs:\n  DINGTALK_CLIENT_ID: existing-app\n  DINGTALK_CLIENT_SECRET: existing-secret\n',
+    { mode: 0o600 },
+  )
+  const ui = new FakeUi()
+
+  const result = await resumePrivateSetup({
+    ...setupOptions,
+    checkpointId: first.checkpointId,
+    ui,
+  })
+
+  assert.equal(result.status, 'awaiting_bind')
+  assert.deepEqual(parse(await readFile(credentialsFile, 'utf8')), {
+    DINGTALK_CLIENT_ID: 'existing-app',
+    DINGTALK_CLIENT_SECRET: 'existing-secret',
+  })
+  assert.match(ui.messages.join('\n'), /凭据文档已转换为当前安装可读取的格式/)
+  assert.match(ui.messages.join('\n'), /已有凭据；私密接力未修改现有 Client Secret/)
 })
 
 test('私密 resume 也拒绝改用 checkpoint 未批准的插件版本', async (t) => {

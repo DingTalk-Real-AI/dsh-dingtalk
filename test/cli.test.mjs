@@ -63,11 +63,8 @@ test('公开 setup CLI 在一个进程内完成插件安装和配置', async (t)
   assert.match(result.stdout, /检测到 dsh web 正在运行/)
   assert.doesNotMatch(await readFile(log, 'utf8'), /dsh web/)
   assert.deepEqual(parse(await readFile(path.join(root, '.dsh', '.credentials.yaml'), 'utf8')), {
-    version: 1,
-    refs: {
-      DINGTALK_CLIENT_ID: 'ding-cli',
-      DINGTALK_CLIENT_SECRET: 'secret-cli',
-    },
+    DINGTALK_CLIENT_ID: 'ding-cli',
+    DINGTALK_CLIENT_SECRET: 'secret-cli',
   })
 })
 

@@ -4,6 +4,7 @@ import { spawnSync } from 'node:child_process'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
+import { parse } from 'yaml'
 
 const PTY_RUNNER = String.raw`
 import os
@@ -194,6 +195,10 @@ test('公开 CLI 拒绝非 TTY，并在 PTY 私密 resume 中保持口令不落 
   assert.doesNotMatch(checkpoint, new RegExp(code))
   assert.doesNotMatch(ownerState, new RegExp(code))
   assert.doesNotMatch(checkpoint + ownerState, /private-app|private-secret/)
+  assert.deepEqual(parse(await readFile(path.join(dshHome, '.credentials.yaml'), 'utf8')), {
+    DINGTALK_CLIENT_ID: 'private-app',
+    DINGTALK_CLIENT_SECRET: 'private-secret',
+  })
 })
 
 test('机器入口拒绝秘密和非法参数，并始终返回脱敏 JSON 错误', async (t) => {
