@@ -34,6 +34,18 @@ if os.WIFSIGNALED(status):
 sys.exit(1)
 `
 
+const IS_WINDOWS = process.platform === 'win32'
+
+function fixtureCommandPath(bin, command) {
+  return path.join(bin, IS_WINDOWS ? `${command}.cmd` : command)
+}
+
+async function writeFixtureCommand(bin, command, scripts) {
+  const file = fixtureCommandPath(bin, command)
+  await writeFile(file, IS_WINDOWS ? scripts.windows : scripts.posix)
+  if (!IS_WINDOWS) await chmod(file, 0o755)
+}
+
 async function fixture(t) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-dingtalk-ai-native-cli-'))
   t.after(() => import('node:fs/promises').then((fs) => fs.rm(root, { recursive: true, force: true })))
@@ -42,14 +54,22 @@ async function fixture(t) {
   const dshHome = path.join(root, '.dsh')
   const stateDir = path.join(root, '.dsh-dingtalk')
   await import('node:fs/promises').then((fs) => fs.mkdir(bin, { recursive: true }))
-  await writeFile(
-    path.join(bin, 'dsh'),
-    `#!/bin/sh\necho "dsh $*" >> "$DSH_TEST_CALL_LOG"\nif [ "$1" = "--version" ]; then echo 0.1.0; fi\nexit 0\n`,
-  )
-  await writeFile(path.join(bin, 'pnpm'), `#!/bin/sh\necho "pnpm $*" >> "$DSH_TEST_CALL_LOG"\necho 11.7.0\nexit 0\n`)
-  await writeFile(path.join(bin, 'npm'), `#!/bin/sh\necho "npm $*" >> "$DSH_TEST_CALL_LOG"\nexit 0\n`)
-  await writeFile(path.join(bin, 'ps'), '#!/bin/sh\nexit 0\n')
-  for (const command of ['dsh', 'pnpm', 'npm', 'ps']) await chmod(path.join(bin, command), 0o755)
+  await writeFixtureCommand(bin, 'dsh', {
+    posix: `#!/bin/sh\necho "dsh $*" >> "$DSH_TEST_CALL_LOG"\nif [ "$1" = "--version" ]; then echo 0.1.0; fi\nexit 0\n`,
+    windows: '@echo off\r\necho dsh %*>>"%DSH_TEST_CALL_LOG%"\r\nif "%~1"=="--version" echo 0.1.0\r\nexit /b 0\r\n',
+  })
+  await writeFixtureCommand(bin, 'pnpm', {
+    posix: `#!/bin/sh\necho "pnpm $*" >> "$DSH_TEST_CALL_LOG"\necho 11.7.0\nexit 0\n`,
+    windows: '@echo off\r\necho pnpm %*>>"%DSH_TEST_CALL_LOG%"\r\necho 11.7.0\r\nexit /b 0\r\n',
+  })
+  await writeFixtureCommand(bin, 'npm', {
+    posix: `#!/bin/sh\necho "npm $*" >> "$DSH_TEST_CALL_LOG"\nexit 0\n`,
+    windows: '@echo off\r\necho npm %*>>"%DSH_TEST_CALL_LOG%"\r\nexit /b 0\r\n',
+  })
+  await writeFixtureCommand(bin, 'ps', {
+    posix: '#!/bin/sh\nexit 0\n',
+    windows: '@echo off\r\nexit /b 0\r\n',
+  })
   const env = {
     ...process.env,
     HOME: root,
@@ -116,9 +136,17 @@ test('setup plan 是严格只读且 stdout 只有脱敏 JSON', async (t) => {
   assert.equal(plan.kind, 'setup-plan')
   assert.equal(plan.status, 'needs_input')
   assert.match(plan.planId, /^setup-plan-[0-9a-f]{16}$/)
+  assert.deepEqual(plan.snapshot.dsh, { installed: true, version: '0.1.0' })
+  assert.deepEqual(plan.snapshot.pnpm, { installed: true, version: '11.7.0', supported: true })
   assert.deepEqual(
     plan.actions.map((action) => action.id),
-    ['install-plugin', 'private-credentials', 'write-profile', 'private-binding', 'start-web'],
+    [
+      'install-plugin',
+      'private-credentials',
+      'write-profile',
+      'private-binding',
+      IS_WINDOWS ? 'restart-web' : 'start-web',
+    ],
   )
   assert.doesNotMatch(result.stdout, new RegExp(root.replaceAll(/[.*+?^${}()|[\]\\]/g, '\\$&')))
   await assert.rejects(() => stat(dshHome), { code: 'ENOENT' })
@@ -158,13 +186,97 @@ test('setup apply 和 resume 使用单文档 JSON 与安全 checkpoint', async (
   )
   await writeFile(path.join(stateDir, 'owner.json'), '{"ownerStaffId":"private-owner"}\n', { mode: 0o600 })
   const readyToStart = run(['setup', '--resume', outcome.checkpointId, '--json'])
-  assert.equal(parseOnlyJson(readyToStart).status, 'start_required')
+  assert.equal(parseOnlyJson(readyToStart).status, IS_WINDOWS ? 'restart_required' : 'start_required')
+  assert.deepEqual(parse(await readFile(path.join(dshHome, '.credentials.yaml'), 'utf8')), {
+    DINGTALK_CLIENT_ID: 'private-app',
+    DINGTALK_CLIENT_SECRET: 'private-secret',
+  })
 
-  await writeFile(path.join(bin, 'ps'), '#!/bin/sh\necho "4242 1 node /tmp/dsh/lib/bin.js web"\n')
-  await chmod(path.join(bin, 'ps'), 0o755)
+  if (IS_WINDOWS) {
+    assert.doesNotMatch(readyToStart.stdout, /private-app|private-secret|private-owner/)
+    return
+  }
+
+  await writeFixtureCommand(bin, 'ps', {
+    posix: '#!/bin/sh\necho "4242 1 node /tmp/dsh/lib/bin.js web"\n',
+    windows: '@echo off\r\necho 4242 1 node C:\\tmp\\dsh\\lib\\bin.js web\r\nexit /b 0\r\n',
+  })
   const completed = run(['setup', '--resume', outcome.checkpointId, '--json'])
   assert.equal(parseOnlyJson(completed).status, 'completed')
   assert.doesNotMatch(completed.stdout, /private-app|private-secret|private-owner/)
+})
+
+test('旧 DSH 的机器 setup 只在批准后将已有 v1 凭据转换为可读格式', async (t) => {
+  const { root, dshHome, stateDir, run } = await fixture(t)
+  await import('node:fs/promises').then((fs) =>
+    Promise.all([fs.mkdir(dshHome, { recursive: true }), fs.mkdir(stateDir, { recursive: true })]),
+  )
+  const credentialsFile = path.join(dshHome, '.credentials.yaml')
+  const originalCredentials =
+    'version: 1\nrefs:\n  DINGTALK_CLIENT_ID: existing-app\n  DINGTALK_CLIENT_SECRET: existing-secret\n'
+  await writeFile(credentialsFile, originalCredentials, { mode: 0o600 })
+  await writeFile(path.join(stateDir, 'owner.json'), '{"ownerStaffId":"bound-owner"}\n', { mode: 0o600 })
+
+  const plan = parseOnlyJson(run(['setup', '--plan', '--json', '--account', 'default']))
+  assert.equal(await readFile(credentialsFile, 'utf8'), originalCredentials)
+  assert.equal(
+    plan.actions.some((action) => action.id === 'private-credentials'),
+    false,
+  )
+
+  const unapprovedAnswers = path.join(root, 'unapproved-answers.json')
+  const unapproved = setupAnswers(plan.planId)
+  unapproved.approvals.writeProfile = false
+  await writeFile(unapprovedAnswers, JSON.stringify(unapproved))
+  const blocked = run(['setup', '--apply', '--json', '--answers', unapprovedAnswers])
+  assert.equal(parseOnlyJson(blocked).status, 'blocked')
+  assert.equal(await readFile(credentialsFile, 'utf8'), originalCredentials)
+
+  const approvedAnswers = path.join(root, 'approved-answers.json')
+  await writeFile(approvedAnswers, JSON.stringify(setupAnswers(plan.planId)))
+  const applied = run(['setup', '--apply', '--json', '--answers', approvedAnswers])
+
+  assert.equal(applied.status, 0, applied.stderr || applied.stdout)
+  assert.equal(parseOnlyJson(applied).status, IS_WINDOWS ? 'restart_required' : 'start_required')
+  assert.deepEqual(parse(await readFile(credentialsFile, 'utf8')), {
+    DINGTALK_CLIENT_ID: 'existing-app',
+    DINGTALK_CLIENT_SECRET: 'existing-secret',
+  })
+})
+
+test('旧 DSH 的机器 setup 对既有 records 返回安全可操作的升级错误', async (t) => {
+  const { root, dshHome, stateDir, run } = await fixture(t)
+  await import('node:fs/promises').then((fs) =>
+    Promise.all([fs.mkdir(dshHome, { recursive: true }), fs.mkdir(stateDir, { recursive: true })]),
+  )
+  const credentialsFile = path.join(dshHome, '.credentials.yaml')
+  const originalCredentials = [
+    'version: 1',
+    'refs:',
+    '  DINGTALK_CLIENT_ID: existing-app',
+    '  DINGTALK_CLIENT_SECRET: do-not-leak',
+    'records:',
+    '  private/route:',
+    '    kind: api-key',
+    '    key: DINGTALK_CLIENT_SECRET',
+    '',
+  ].join('\n')
+  await writeFile(credentialsFile, originalCredentials, { mode: 0o600 })
+  await writeFile(path.join(stateDir, 'owner.json'), '{"ownerStaffId":"bound-owner"}\n', { mode: 0o600 })
+
+  const plan = parseOnlyJson(run(['setup', '--plan', '--json', '--account', 'default']))
+  const answersFile = path.join(root, 'answers.json')
+  await writeFile(answersFile, JSON.stringify(setupAnswers(plan.planId)))
+
+  const applied = run(['setup', '--apply', '--json', '--answers', answersFile])
+
+  assert.equal(applied.status, 1)
+  const result = parseOnlyJson(applied)
+  assert.equal(result.status, 'failed')
+  assert.deepEqual(result.error, { code: 'dsh_upgrade_required', stepId: 'write-profile' })
+  assert.doesNotMatch(applied.stdout + applied.stderr, /do-not-leak|private\/route/)
+  assert.doesNotMatch(applied.stdout + applied.stderr, new RegExp(root.replaceAll(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+  assert.equal(await readFile(credentialsFile, 'utf8'), originalCredentials)
 })
 
 test('公开 CLI 拒绝非 TTY，并在 PTY 私密 resume 中保持口令不落 checkpoint', async (t) => {
@@ -199,6 +311,37 @@ test('公开 CLI 拒绝非 TTY，并在 PTY 私密 resume 中保持口令不落 
     DINGTALK_CLIENT_ID: 'private-app',
     DINGTALK_CLIENT_SECRET: 'private-secret',
   })
+})
+
+test('旧 DSH 无法展平 records 时，PTY 私密 resume 提示先升级且不泄露细节', async (t) => {
+  if (process.platform === 'win32') return
+  const { root, dshHome, run, runPty } = await fixture(t)
+  const plan = parseOnlyJson(run(['setup', '--plan', '--json', '--account', 'default']))
+  const answersFile = path.join(root, 'answers.json')
+  await writeFile(answersFile, JSON.stringify(setupAnswers(plan.planId)))
+  const outcome = parseOnlyJson(run(['setup', '--apply', '--json', '--answers', answersFile]))
+  const credentialsFile = path.join(dshHome, '.credentials.yaml')
+  const originalCredentials = [
+    'version: 1',
+    'refs:',
+    '  DINGTALK_CLIENT_ID: private-app',
+    '  DINGTALK_CLIENT_SECRET: must-not-appear',
+    'records:',
+    '  private/route:',
+    '    kind: api-key',
+    '    key: DINGTALK_CLIENT_SECRET',
+    '',
+  ].join('\n')
+  await writeFile(credentialsFile, originalCredentials, { mode: 0o600 })
+
+  const privateResume = runPty(['setup', '--resume', outcome.checkpointId])
+
+  assert.equal(privateResume.status, 1)
+  const terminalOutput = privateResume.stdout + privateResume.stderr
+  assert.match(terminalOutput, /请先升级 DSH/)
+  assert.doesNotMatch(terminalOutput, /无法恢复该 setup checkpoint|must-not-appear|private\/route/)
+  assert.doesNotMatch(terminalOutput, new RegExp(root.replaceAll(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+  assert.equal(await readFile(credentialsFile, 'utf8'), originalCredentials)
 })
 
 test('机器入口拒绝秘密和非法参数，并始终返回脱敏 JSON 错误', async (t) => {

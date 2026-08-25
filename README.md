@@ -81,6 +81,8 @@ Common outcomes:
 | `restart_required`             | A previously running or unobservable `dsh web` may need a restart; follow the process-inspection note below.                       |
 | `completed`                    | Configuration is complete and a previously stopped `dsh web` is now running; continue with `doctor --json`.                        |
 
+If a `failed` result has `error.code` set to `dsh_upgrade_required`, the installed DSH is too old to consume the existing credential records without data loss. Upgrade DSH, then create and apply a fresh plan. Setup leaves the credential file unchanged and never copies records or secrets into JSON.
+
 `restart_required` is conservative because machine setup never kills processes and treats an unavailable process inspection as `unknown`. If sandboxed `ps` is unavailable, do not assume that the connected process is stale: keep it running, validate with `doctor --json` and one real direct message, and record the process-inspection limitation. Restart only if validation fails or the process predates the applied configuration.
 
 JSON mode writes exactly one complete JSON document to stdout. Exit code `0` means the protocol returned successfully, including human-wait states and diagnostic `warning/unverified`; `1` means execution or diagnostics failed; `2` means invalid arguments or answers. Automation should depend on `schemaVersion`, `kind`, `status`, `id`, and `code`, not display messages.

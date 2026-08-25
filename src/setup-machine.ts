@@ -13,13 +13,21 @@ import {
 } from './setup-checkpoint.js'
 import { inspectAndPlanSetup, type InspectSetupOptions, type SetupPlan, type SetupPlanRequest } from './setup-plan.js'
 import {
+  CredentialDshUpgradeRequiredError,
   loadDingTalkAccountCredentials,
   loadWebProfileConfig,
+  reconcileDingTalkCredentialLayout,
   updateWebProfileAccountAccess,
   updateWebProfileConfig,
   upsertWebProfileAccount,
 } from './setup-state.js'
-import { runPrivateAccountSetup, type CommandRunner, type RunGuidedSetupOptions, type SetupUi } from './setup.js'
+import {
+  installedDshCredentialLayout,
+  runPrivateAccountSetup,
+  type CommandRunner,
+  type RunGuidedSetupOptions,
+  type SetupUi,
+} from './setup.js'
 import type { DshWebProcessStatus } from './service.js'
 
 const MACHINE_SETUP_SCHEMA_VERSION = 1 as const
@@ -54,7 +62,7 @@ export interface MachineSetupNext {
 }
 
 export interface MachineSetupError {
-  code: 'approval_required' | 'command_failed' | 'configuration_failed' | 'environment_changed'
+  code: 'approval_required' | 'command_failed' | 'configuration_failed' | 'dsh_upgrade_required' | 'environment_changed'
   stepId?: string
   approvalIds?: string[]
 }
@@ -236,6 +244,14 @@ async function bindingStatus(options: MachineSetupOptions, accountId: string) {
   }).status()
 }
 
+async function reconcileConfiguredCredentialLayout(options: MachineSetupOptions, accountId: string): Promise<void> {
+  const profile = await loadWebProfileConfig(options.dshHome)
+  const account = profile.accounts.find((item) => item.id === accountId)
+  const credentials = await loadDingTalkAccountCredentials(options.dshHome, accountId, account)
+  if (credentials?.source !== 'credentials') return
+  await reconcileDingTalkCredentialLayout(options.dshHome, installedDshCredentialLayout(options.runner))
+}
+
 async function finishFromObservedState(
   options: MachineSetupOptions,
   checkpoint: SetupCheckpoint,
@@ -339,7 +355,8 @@ async function continueMachineSetup(
     checkpoint = await persistProgress(options, checkpoint, 'applying', completed)
   }
 
-  if (!completed.has('write-profile')) {
+  const writeProfilePending = !completed.has('write-profile')
+  if (writeProfilePending) {
     try {
       const { accountId, features } = checkpoint.answers
       await upsertWebProfileAccount(options.dshHome, accountId, { enable: true })
@@ -357,6 +374,21 @@ async function continueMachineSetup(
     } catch {
       return failStep(options, checkpoint, completed, 'write-profile', 'configuration_failed')
     }
+  }
+
+  try {
+    await reconcileConfiguredCredentialLayout(options, checkpoint.answers.accountId)
+  } catch (error) {
+    return failStep(
+      options,
+      checkpoint,
+      completed,
+      'write-profile',
+      error instanceof CredentialDshUpgradeRequiredError ? 'dsh_upgrade_required' : 'configuration_failed',
+    )
+  }
+
+  if (writeProfilePending) {
     completed.add('write-profile')
     checkpoint = await persistProgress(options, checkpoint, 'applying', completed)
   }

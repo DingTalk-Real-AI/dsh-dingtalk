@@ -7,6 +7,18 @@ const dshHome = process.env.DSH_HOME
 if (!dshHome) throw new Error('DSH_HOME is required for the packed DSH smoke')
 const stateDir = process.env.DSH_DINGTALK_STATE_DIR
 if (!stateDir) throw new Error('DSH_DINGTALK_STATE_DIR is required for the packed DSH smoke')
+
+function setupFailureMessage(result) {
+  const reason = result.error?.code ? `error=${result.error.code}` : `exit=${result.status ?? 'unknown'}`
+  const signal = result.signal ? ` signal=${result.signal}` : ''
+  const output = `${result.stdout ?? ''}\n${result.stderr ?? ''}`
+    .replaceAll('smoke-client-secret', '<redacted-client-secret>')
+    .replace(/\/bind\s+[A-Z0-9]{6,}/gu, '/bind <redacted>')
+    .trim()
+  const tail = output.length > 2_000 ? `…${output.slice(-2_000)}` : output
+  return `Packed public setup failed before the DSH boot smoke (${reason}${signal})${tail ? `\n${tail}` : ''}`
+}
+
 const which = spawnSync('which', ['dsh'], { encoding: 'utf8', env: process.env })
 const realDsh = which.status === 0 ? which.stdout.trim() : ''
 if (!realDsh) throw new Error('Unable to resolve the installed DSH binary')
@@ -37,7 +49,7 @@ process.exit(result.status ?? 1)
   )
   const setup = spawnSync(process.execPath, [packedBin, 'setup'], {
     encoding: 'utf8',
-    input: ['2', 'smoke-client-id', 'smoke-client-secret', '', '', '', '', '', 'n'].join('\n'),
+    input: ['2', 'smoke-client-id', 'smoke-client-secret', '', '', '', '', 'n'].join('\n'),
     timeout: 30_000,
     env: {
       ...process.env,
@@ -46,7 +58,7 @@ process.exit(result.status ?? 1)
       PATH: `${wrapperRoot}${path.delimiter}${process.env.PATH ?? ''}`,
     },
   })
-  if (setup.status !== 0) throw new Error('Packed public setup failed before the DSH boot smoke')
+  if (setup.status !== 0) throw new Error(setupFailureMessage(setup))
 } finally {
   await rm(wrapperRoot, { recursive: true, force: true })
 }

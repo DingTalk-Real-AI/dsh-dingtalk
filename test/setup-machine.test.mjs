@@ -368,7 +368,7 @@ test('机器 setup 安装 pnpm 后仍验证主版本，不把旧版本误报为�
   assert.equal(result.error?.stepId, 'install-pnpm')
   assert.equal(result.error?.code, 'command_failed')
   assert.equal(
-    runner.calls.some((call) => call.join(' ') === 'dsh plugin --profile web add'),
+    runner.calls.some(([command, subcommand]) => command === 'dsh' && subcommand === 'plugin'),
     false,
   )
 })

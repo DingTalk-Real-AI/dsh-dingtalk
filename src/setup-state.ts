@@ -100,6 +100,15 @@ interface CredentialDocument {
 
 export type CredentialDocumentLayout = 'flat' | 'v1'
 
+export class CredentialDshUpgradeRequiredError extends Error {
+  readonly code = 'dsh_upgrade_required'
+
+  constructor() {
+    super('凭据包含 records，无法安全转换为旧版 DSH 的扁平格式；请先升级 DSH 后重试。')
+    this.name = 'CredentialDshUpgradeRequiredError'
+  }
+}
+
 export interface SaveDingTalkCredentialOptions {
   layout: CredentialDocumentLayout
   credentialRefs?: AccountCredentialRefs
@@ -231,7 +240,7 @@ function parseCredentialDocument(
       const hasRecords = records !== undefined && records !== null && Object.keys(records).length > 0
       if (targetLayout === 'flat') {
         if (hasRecords) {
-          throw new Error(`凭据文件 ${file} 包含 records，无法安全转换为旧版 DSH 的扁平格式；请先升级 DSH`)
+          throw new CredentialDshUpgradeRequiredError()
         }
         const root = document.contents
         if (isMap(currentRefs)) {

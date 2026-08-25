@@ -152,7 +152,7 @@ export function credentialLayoutForDshVersion(version: string): CredentialDocume
   return compareSemver(parsed, FIRST_VERSIONED_CREDENTIAL_DSH) < 0 ? 'flat' : 'v1'
 }
 
-function installedDshCredentialLayout(runner: CommandRunner): CredentialDocumentLayout {
+export function installedDshCredentialLayout(runner: CommandRunner): CredentialDocumentLayout {
   let result: CommandResult
   try {
     result = runner.run('dsh', ['--version'])

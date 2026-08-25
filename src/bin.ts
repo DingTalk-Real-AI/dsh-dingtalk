@@ -25,7 +25,12 @@ import {
   type MachineSetupOutcome,
 } from './setup-machine.js'
 import { runGuidedSetup } from './setup.js'
-import { enabledWebProfileAccounts, loadDingTalkAccountCredentials, loadWebProfileConfig } from './setup-state.js'
+import {
+  CredentialDshUpgradeRequiredError,
+  enabledWebProfileAccounts,
+  loadDingTalkAccountCredentials,
+  loadWebProfileConfig,
+} from './setup-state.js'
 import { SystemRunner } from './system-runner.js'
 
 function dshHome(): string {
@@ -227,8 +232,12 @@ async function privateResume(checkpointId: string): Promise<number> {
     }
     ui.success('私密步骤已经满足，可让 AI 使用同一 checkpoint 续跑。')
     return outcomeExitCode(result)
-  } catch {
-    console.error('无法恢复该 setup checkpoint；它可能不存在、已损坏或当前状态不允许私密续跑。')
+  } catch (error) {
+    console.error(
+      error instanceof CredentialDshUpgradeRequiredError
+        ? error.message
+        : '无法恢复该 setup checkpoint；它可能不存在、已损坏或当前状态不允许私密续跑。',
+    )
     return 1
   } finally {
     ui.close()

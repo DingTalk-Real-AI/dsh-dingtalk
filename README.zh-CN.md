@@ -81,6 +81,8 @@ npx @dingtalk-real-ai/dsh-dingtalk@<version> setup --apply --json --answers <ans
 | `restart_required`             | 原先已运行或无法探测的 `dsh web` 可能需要重启；按下方进程探测说明处理。             |
 | `completed`                    | 配置完成，且检测到原先未运行的 `dsh web` 已在配置后启动；继续运行 `doctor --json`。 |
 
+若 `failed` 的 `error.code` 为 `dsh_upgrade_required`，说明旧版 DSH 无法无损读取现有凭据记录；先升级 DSH，再重新 plan/apply。setup 不会改写原凭据文件，也不会把记录或 Secret 放进 JSON。
+
 `restart_required` 是保守结果：机器 setup 不会杀进程，并把无法执行的进程探测视为 `unknown`。若沙箱无法执行 `ps`，不要直接认定已经联通的进程仍使用旧配置；先保持现有进程，用 `doctor --json` 和一条真实私聊消息验收，并记录进程探测受限。仅当验收失败或该进程早于本次配置写入启动时才重启。
 
 JSON 模式的 stdout 始终只有一个完整 JSON 文档。退出码 `0` 表示协议成功返回（包括等待人工步骤、诊断 `warning/unverified`），`1` 表示执行或诊断失败，`2` 表示参数或 answers 无效。自动化应依赖 `schemaVersion`、`kind`、`status`、`id` 和 `code`，不要解析展示文案。
