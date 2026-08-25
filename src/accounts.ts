@@ -11,6 +11,16 @@ export interface AccountCredentialRefs {
   clientSecretRef: string
 }
 
+export function assertAccountCredentialRefs(refs: AccountCredentialRefs): void {
+  if (
+    !/^[A-Za-z_][A-Za-z0-9_]*$/u.test(refs.clientIdRef) ||
+    !/^[A-Za-z_][A-Za-z0-9_]*$/u.test(refs.clientSecretRef) ||
+    refs.clientIdRef === refs.clientSecretRef
+  ) {
+    throw new Error('钉钉机器人 Client ID 与 Client Secret 必须使用两个不同的有效凭据引用')
+  }
+}
+
 export interface ConfiguredAccountSpec extends AccountCredentialRefs {
   id: string
   enabled: boolean
@@ -105,13 +115,17 @@ export function configuredAccountSpecs(config: ConfigInput): ConfiguredAccountSp
         : groupAllowlist.length
           ? 'allowlist'
           : 'none')
+    const credentialRefs = {
+      clientIdRef: raw.clientIdRef?.trim() || refs.clientIdRef,
+      clientSecretRef: raw.clientSecretRef?.trim() || refs.clientSecretRef,
+    }
+    assertAccountCredentialRefs(credentialRefs)
     result.push({
       id,
       enabled: true,
       clientId: raw.clientId?.trim() ?? '',
       clientSecret: raw.clientSecret?.trim() ?? '',
-      clientIdRef: raw.clientIdRef?.trim() || refs.clientIdRef,
-      clientSecretRef: raw.clientSecretRef?.trim() || refs.clientSecretRef,
+      ...credentialRefs,
       ownerStaffId: raw.ownerStaffId?.trim() ?? '',
       senderAccess: raw.senderAccess ?? (useLegacyRoot ? (config.senderAccess ?? 'owner') : 'owner'),
       allowedSenders: raw.allowedSenders?.filter(Boolean) ?? (useLegacyRoot ? (config.allowedSenders ?? []) : []),

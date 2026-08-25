@@ -1,6 +1,11 @@
-import { spawnSync } from 'node:child_process'
+import type { SpawnSyncOptionsWithStringEncoding, SpawnSyncReturns } from 'node:child_process'
+import { createRequire } from 'node:module'
 
 import type { CommandResult, CommandRunner } from './setup.js'
+
+const { sync: spawnSync } = createRequire(import.meta.url)('cross-spawn') as {
+  sync(command: string, args: readonly string[], options: SpawnSyncOptionsWithStringEncoding): SpawnSyncReturns<string>
+}
 
 export class SystemRunner implements CommandRunner {
   run(command: string, args: string[]): CommandResult {

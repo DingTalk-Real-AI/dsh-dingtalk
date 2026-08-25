@@ -14,6 +14,9 @@ importers:
       '@deepseek-ai/schemastery':
         specifier: ^3.18.1
         version: 3.18.1
+      cross-spawn:
+        specifier: 7.0.6
+        version: 7.0.6
       dingtalk-stream:
         specifier: ^2.1.4
         version: 2.1.5(supports-color@7.2.0)
