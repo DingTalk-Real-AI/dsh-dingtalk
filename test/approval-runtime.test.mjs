@@ -169,6 +169,7 @@ test('公开 apply 运行时允许管理员通过私聊或同群一次性文字�
   await robotListener(delivery('start', '开始'))
   await waitUntil(() => typeof listeners.get('approval/request') === 'function' && followupCount === 1)
   const approve = listeners.get('approval/request')
+  t.mock.timers.enable({ apis: ['setTimeout'] })
   let fallbackCalls = 0
   const outcome = approve(
     {
@@ -206,6 +207,9 @@ test('公开 apply 运行时允许管理员通过私聊或同群一次性文字�
   await robotListener(delivery('owner-confirm', `确认 ${code}`))
   assert.equal(await outcome, 'allowed-once')
 
+  const timeoutApprovalMessageCount = requests.filter((request) =>
+    request.body?.markdown?.text?.includes('审批敏感操作'),
+  ).length
   const timedOut = approve(
     {
       agent,
@@ -214,8 +218,18 @@ test('公开 apply 运行时允许管理员通过私聊或同群一次性文字�
     },
     async () => 'unavailable',
   )
+  await waitUntil(
+    () =>
+      requests.filter((request) => request.body?.markdown?.text?.includes('审批敏感操作')).length ===
+      timeoutApprovalMessageCount + 1,
+  )
+  t.mock.timers.tick(config.approvalTimeoutMs)
   assert.equal(await timedOut, 'unavailable')
-  assert.match(requests.at(-1).body.markdown.text, /审批已超时/)
+  await waitUntil(() => requests.some((request) => /审批已超时/.test(request.body?.markdown?.text ?? '')))
+  assert.match(
+    requests.findLast((request) => /审批已超时/.test(request.body?.markdown?.text ?? '')).body.markdown.text,
+    /审批已超时/,
+  )
 
   const approvalMessageCount = requests.filter((request) =>
     request.body?.markdown?.text?.includes('审批敏感操作'),
