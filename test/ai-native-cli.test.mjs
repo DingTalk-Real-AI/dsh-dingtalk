@@ -56,7 +56,8 @@ async function fixture(t) {
   await import('node:fs/promises').then((fs) => fs.mkdir(bin, { recursive: true }))
   await writeFixtureCommand(bin, 'dsh', {
     posix: `#!/bin/sh\necho "dsh $*" >> "$DSH_TEST_CALL_LOG"\nif [ "$1" = "--version" ]; then echo 0.1.0; fi\nexit 0\n`,
-    windows: '@echo off\r\necho dsh %*>>"%DSH_TEST_CALL_LOG%"\r\nif "%~1"=="--version" echo 0.1.0\r\nexit /b 0\r\n',
+    windows:
+      '@echo off\r\necho dsh %~1 %~2 %~3 %~4>>"%DSH_TEST_CALL_LOG%"\r\nif "%~1"=="--version" echo 0.1.0\r\nexit /b 0\r\n',
   })
   await writeFixtureCommand(bin, 'pnpm', {
     posix: `#!/bin/sh\necho "pnpm $*" >> "$DSH_TEST_CALL_LOG"\necho 11.7.0\nexit 0\n`,
