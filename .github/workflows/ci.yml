@@ -52,7 +52,7 @@ jobs:
       - run: pnpm run ci
 
   packed-dsh-smoke:
-    name: Packed package with DSH ${{ matrix.dsh-version }}
+    name: ${{ matrix.job_name }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -60,8 +60,10 @@ jobs:
         include:
           - dsh-version: 0.1.0-rc.7
             node-version: '22'
+            job_name: Packed package with DSH 0.1.0-rc.7
           - dsh-version: latest
             node-version: '24'
+            job_name: Packed package with latest DSH
     steps:
       - uses: actions/checkout@v6
       - uses: pnpm/action-setup@v6
