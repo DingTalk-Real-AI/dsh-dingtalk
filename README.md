@@ -23,7 +23,7 @@ read-only inspection and plan
 You can give this prompt to an AI coding agent:
 
 ```text
-Install the DingTalk connector using the AI Native setup flow in this README. Run the read-only plan first and show me the plan and non-secret answers before apply. Never request, read, or record a Client ID, Client Secret, QR URL, Device Code, /bind code, or owner staff ID. At a private checkpoint, pause so I can continue in a separate local terminal, then validate with JSON resume and doctor --json. Never automatically start, stop, or restart dsh web.
+Install the DingTalk connector using the AI Native setup flow in this README. Run the read-only plan first and show me the plan and non-secret answers before apply. Never request, read, or record a Client ID, Client Secret, QR URL, Device Code, /bind code, or owner staff ID. At a private checkpoint, pause so I can continue in a separate local terminal, then validate with JSON resume and doctor --json. Never automatically start, stop, or restart dsh web. If JSON resume returns restart_required only because process inspection is unknown, for example because sandboxed ps is unavailable, do not restart or loop resume automatically. Keep the existing dsh web running, validate it with doctor --json and one real direct message, and record the process-inspection limitation. Ask me to restart only if validation fails or the process predates the applied configuration.
 ```
 
 Resolve the stable release version first, then pin every step to that version:
@@ -78,8 +78,10 @@ Common outcomes:
 | `awaiting_private_binding`     | Run the same private resume locally to display a new one-time owner-binding code.                                                  |
 | `awaiting_bind`                | Start DSH Web, wait for the bot to connect, then send the displayed `/bind <one-time-code>` in a DingTalk direct message.          |
 | `start_required`               | Explicitly run `dsh web` in a dedicated terminal.                                                                                  |
-| `restart_required`             | Explicitly restart `dsh web` with the existing process manager; machine setup never kills it.                                      |
+| `restart_required`             | A previously running or unobservable `dsh web` may need a restart; follow the process-inspection note below.                       |
 | `completed`                    | Configuration is complete and a previously stopped `dsh web` is now running; continue with `doctor --json`.                        |
+
+`restart_required` is conservative because machine setup never kills processes and treats an unavailable process inspection as `unknown`. If sandboxed `ps` is unavailable, do not assume that the connected process is stale: keep it running, validate with `doctor --json` and one real direct message, and record the process-inspection limitation. Restart only if validation fails or the process predates the applied configuration.
 
 JSON mode writes exactly one complete JSON document to stdout. Exit code `0` means the protocol returned successfully, including human-wait states and diagnostic `warning/unverified`; `1` means execution or diagnostics failed; `2` means invalid arguments or answers. Automation should depend on `schemaVersion`, `kind`, `status`, `id`, and `code`, not display messages.
 

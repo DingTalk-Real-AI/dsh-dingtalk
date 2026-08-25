@@ -23,7 +23,7 @@ AI 可以读取安装计划、执行经过批准的非秘密步骤，并从 chec
 可以把下面这句话直接交给 AI 编程助手：
 
 ```text
-请按本仓库 README 的 AI Native setup 流程安装钉钉连接器。先运行只读 plan，展示计划和非秘密 answers 给我确认后再 apply；不要索取、读取或记录 Client ID、Client Secret、扫码链接、Device Code、/bind 口令或管理员 staffId。遇到 private checkpoint 时暂停，让我在独立本机终端完成，再用同一 checkpoint 的 JSON resume 和 doctor --json 验收。不要自动启动、停止或重启 dsh web。
+请按本仓库 README 的 AI Native setup 流程安装钉钉连接器。先运行只读 plan，展示计划和非秘密 answers 给我确认后再 apply；不要索取、读取或记录 Client ID、Client Secret、扫码链接、Device Code、/bind 口令或管理员 staffId。遇到 private checkpoint 时暂停，让我在独立本机终端完成，再用同一 checkpoint 的 JSON resume 和 doctor --json 验收。不要自动启动、停止或重启 dsh web。若 JSON resume 仅因进程探测为 unknown（例如沙箱无法执行 ps）而返回 restart_required，不要自动重启或循环 resume；先保持现有 dsh web 运行，用 doctor --json 和一条真实私聊消息验收，并记录进程探测受限。仅当验收失败或该进程早于本次配置写入启动时，才请我重启。
 ```
 
 建议先查询正式版版本号，后续所有步骤固定使用同一版本：
@@ -78,8 +78,10 @@ npx @dingtalk-real-ai/dsh-dingtalk@<version> setup --apply --json --answers <ans
 | `awaiting_private_binding`     | 在独立本机终端运行同一个 private resume，现场获取一次性绑定口令。                   |
 | `awaiting_bind`                | 启动 DSH Web，等待机器人连接后，在钉钉私聊发送终端显示的 `/bind <一次性口令>`。     |
 | `start_required`               | 在专用终端显式运行 `dsh web`。                                                      |
-| `restart_required`             | 使用原来的进程管理方式显式重启 `dsh web`；机器 setup 不会杀进程。                   |
+| `restart_required`             | 原先已运行或无法探测的 `dsh web` 可能需要重启；按下方进程探测说明处理。             |
 | `completed`                    | 配置完成，且检测到原先未运行的 `dsh web` 已在配置后启动；继续运行 `doctor --json`。 |
+
+`restart_required` 是保守结果：机器 setup 不会杀进程，并把无法执行的进程探测视为 `unknown`。若沙箱无法执行 `ps`，不要直接认定已经联通的进程仍使用旧配置；先保持现有进程，用 `doctor --json` 和一条真实私聊消息验收，并记录进程探测受限。仅当验收失败或该进程早于本次配置写入启动时才重启。
 
 JSON 模式的 stdout 始终只有一个完整 JSON 文档。退出码 `0` 表示协议成功返回（包括等待人工步骤、诊断 `warning/unverified`），`1` 表示执行或诊断失败，`2` 表示参数或 answers 无效。自动化应依赖 `schemaVersion`、`kind`、`status`、`id` 和 `code`，不要解析展示文案。
 
