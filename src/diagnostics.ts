@@ -5,9 +5,30 @@ import type { DingTalkAppCredentials } from './credentials.js'
 
 export type DiagnosticStatus = 'pass' | 'warn' | 'fail'
 
+export type DiagnosticCode =
+  | 'node.supported'
+  | 'node.unsupported'
+  | 'stream.connected'
+  | 'stream.reconnecting'
+  | 'stream.stale'
+  | 'stream.unobserved'
+  | 'stream.not-connected'
+  | 'credentials.missing'
+  | 'credentials.unverified'
+  | 'credentials.verified'
+  | 'credentials.rejected'
+  | 'credentials.verification-error'
+  | 'owner.configured'
+  | 'owner.missing'
+  | 'interaction-card.configured'
+  | 'interaction-card.not-configured'
+  | 'ai-card.unavailable'
+  | 'ai-card.unverified'
+
 export interface DiagnosticCheck {
   id: 'node' | 'credentials' | 'owner' | 'interaction-card' | 'ai-card' | 'stream'
   status: DiagnosticStatus
+  code: DiagnosticCode
   title: string
   detail: string
 }
@@ -21,6 +42,7 @@ interface RuntimeState {
 }
 
 const STREAM_STATUS_FRESH_MS = 30_000
+const CREDENTIAL_VERIFY_TIMEOUT_MS = 10_000
 
 export interface DiagnosticOptions extends DingTalkAppCredentials {
   stateDir: string
@@ -43,6 +65,7 @@ export async function verifyDingTalkCredentials(clientId: string, clientSecret: 
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ appKey: clientId, appSecret: clientSecret }),
+    signal: AbortSignal.timeout(CREDENTIAL_VERIFY_TIMEOUT_MS),
   })
   return response.ok
 }
@@ -50,9 +73,11 @@ export async function verifyDingTalkCredentials(clientId: string, clientSecret: 
 /** 收集只读诊断项；不会创建卡片、发送消息或修改应用配置。 */
 export async function collectDiagnostics(options: DiagnosticOptions): Promise<DiagnosticCheck[]> {
   const checks: DiagnosticCheck[] = []
+  const nodeSupported = isSupportedNodeVersion(process.versions.node)
   checks.push({
     id: 'node',
-    status: isSupportedNodeVersion(process.versions.node) ? 'pass' : 'fail',
+    status: nodeSupported ? 'pass' : 'fail',
+    code: nodeSupported ? 'node.supported' : 'node.unsupported',
     title: 'Node.js',
     detail: `当前 ${process.versions.node}，要求 ^22.19.0 或 >=24.0.0`,
   })
@@ -61,6 +86,16 @@ export async function collectDiagnostics(options: DiagnosticOptions): Promise<Di
   const streamStatus = runtime?.stream?.status
   const streamObservedAt = runtime?.stream?.observedAt
   const streamFresh = typeof streamObservedAt === 'number' && Date.now() - streamObservedAt <= STREAM_STATUS_FRESH_MS
+  const streamCode: DiagnosticCode =
+    streamStatus === 'connected' && streamFresh
+      ? 'stream.connected'
+      : streamStatus === 'reconnecting' && streamFresh
+        ? 'stream.reconnecting'
+        : !streamStatus
+          ? 'stream.unobserved'
+          : !streamFresh
+            ? 'stream.stale'
+            : 'stream.not-connected'
   checks.push({
     id: 'stream',
     status:
@@ -69,6 +104,7 @@ export async function collectDiagnostics(options: DiagnosticOptions): Promise<Di
         : streamStatus === 'reconnecting' && streamFresh
           ? 'fail'
           : 'warn',
+    code: streamCode,
     title: 'Stream 连接',
     detail:
       streamStatus && streamFresh
@@ -82,17 +118,25 @@ export async function collectDiagnostics(options: DiagnosticOptions): Promise<Di
     checks.push({
       id: 'credentials',
       status: 'fail',
+      code: 'credentials.missing',
       title: '应用凭据',
       detail: '缺少 clientId/clientSecret 或对应环境变量',
     })
   } else if (!options.verifyCredentials) {
-    checks.push({ id: 'credentials', status: 'warn', title: '应用凭据', detail: '已配置，但本次未执行联网验证' })
+    checks.push({
+      id: 'credentials',
+      status: 'warn',
+      code: 'credentials.unverified',
+      title: '应用凭据',
+      detail: '已配置，但本次未执行联网验证',
+    })
   } else {
     try {
       const valid = await options.verifyCredentials(options.clientId, options.clientSecret)
       checks.push({
         id: 'credentials',
         status: valid ? 'pass' : 'fail',
+        code: valid ? 'credentials.verified' : 'credentials.rejected',
         title: '应用凭据',
         detail: valid ? 'accessToken 获取成功' : 'accessToken 获取失败，请核对 AppKey/AppSecret',
       })
@@ -100,6 +144,7 @@ export async function collectDiagnostics(options: DiagnosticOptions): Promise<Di
       checks.push({
         id: 'credentials',
         status: 'fail',
+        code: 'credentials.verification-error',
         title: '应用凭据',
         detail: `联网验证失败：${error instanceof Error ? error.message : error}`,
       })
@@ -111,6 +156,7 @@ export async function collectDiagnostics(options: DiagnosticOptions): Promise<Di
   checks.push({
     id: 'owner',
     status: ownerStaffId ? 'pass' : 'fail',
+    code: ownerStaffId ? 'owner.configured' : 'owner.missing',
     title: '唯一管理员',
     detail: ownerStaffId ? '已完成绑定或显式配置' : '尚未绑定；请先运行 setup 并在机器人私聊发送绑定指令',
   })
@@ -118,6 +164,7 @@ export async function collectDiagnostics(options: DiagnosticOptions): Promise<Di
   checks.push({
     id: 'interaction-card',
     status: options.interactionCardTemplateId ? 'pass' : 'warn',
+    code: options.interactionCardTemplateId ? 'interaction-card.configured' : 'interaction-card.not-configured',
     title: '审批交互',
     detail: options.interactionCardTemplateId
       ? '已配置互动卡片模板；按钮 actionId 需为 approve/reject'
@@ -129,6 +176,7 @@ export async function collectDiagnostics(options: DiagnosticOptions): Promise<Di
   checks.push({
     id: 'ai-card',
     status: aiCard?.available === false ? 'fail' : 'warn',
+    code: aiCard?.available === false ? 'ai-card.unavailable' : 'ai-card.unverified',
     title: 'AI Card 流式权限',
     detail:
       aiCard?.available === false

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { chmod, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { chmod, link, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -260,6 +260,69 @@ test('多个钉钉账号使用独立凭据引用且不会覆盖默认账号', as
       DINGTALK_ACCOUNT_SUPPORT_BOT_CLIENT_SECRET: 'support-secret',
     },
   })
+})
+
+test('Client ID 与 Client Secret 使用同一凭据引用时 fail-closed', async (t) => {
+  const dshHome = await mkdtemp(path.join(os.tmpdir(), 'dsh-dingtalk-duplicate-refs-'))
+  t.after(() => import('node:fs/promises').then((fs) => fs.rm(dshHome, { recursive: true, force: true })))
+  const duplicateRefs = { clientIdRef: 'DINGTALK_SAME_REF', clientSecretRef: 'DINGTALK_SAME_REF' }
+
+  await assert.rejects(
+    () =>
+      saveDingTalkAccountCredentials(
+        dshHome,
+        'default',
+        { clientId: 'private-app', clientSecret: 'private-secret' },
+        duplicateRefs,
+      ),
+    /两个不同的有效凭据引用/,
+  )
+  await assert.rejects(() => stat(path.join(dshHome, '.credentials.yaml')), { code: 'ENOENT' })
+
+  const profileFile = path.join(dshHome, 'profiles', 'web', 'cordis.patch.yml')
+  await import('node:fs/promises').then((fs) => fs.mkdir(path.dirname(profileFile), { recursive: true }))
+  await writeFile(
+    profileFile,
+    '- id: dingtalk-channel\n  config:\n    accounts:\n      - id: default\n        clientIdRef: DINGTALK_SAME_REF\n        clientSecretRef: DINGTALK_SAME_REF\n',
+  )
+  await assert.rejects(() => loadWebProfileConfig(dshHome), /两个不同的有效凭据引用/)
+})
+
+test('并发写入多个 web profile 账号不会发生丢失更新', async (t) => {
+  const dshHome = await mkdtemp(path.join(os.tmpdir(), 'dsh-dingtalk-concurrent-profile-'))
+  t.after(() => import('node:fs/promises').then((fs) => fs.rm(dshHome, { recursive: true, force: true })))
+  const accountIds = Array.from({ length: 12 }, (_, index) => `robot-${index}`)
+
+  await Promise.all(accountIds.map((accountId) => upsertWebProfileAccount(dshHome, accountId)))
+
+  const profile = await loadWebProfileConfig(dshHome)
+  assert.deepEqual(new Set(profile.accounts.map((account) => account.id)), new Set(accountIds))
+})
+
+test('web profile 写入可安全回收死进程遗留锁', async (t) => {
+  const dshHome = await mkdtemp(path.join(os.tmpdir(), 'dsh-dingtalk-stale-profile-lock-'))
+  t.after(() => import('node:fs/promises').then((fs) => fs.rm(dshHome, { recursive: true, force: true })))
+  const profileFile = path.join(dshHome, 'profiles', 'web', 'cordis.patch.yml')
+  await import('node:fs/promises').then((fs) => fs.mkdir(path.dirname(profileFile), { recursive: true }))
+  const lockFile = `${profileFile}.lock`
+  const deadPid = 2_147_483_647
+  const token = '22222222-2222-4222-8222-222222222222'
+  const ownerName = `${path.basename(lockFile)}.owner.${deadPid}.${token}`
+  const ownerFile = path.join(path.dirname(lockFile), ownerName)
+  const lockValue = `${JSON.stringify({ pid: deadPid, token, ownerFile: ownerName })}\n`
+  await writeFile(ownerFile, lockValue, { mode: 0o600 })
+  await link(ownerFile, lockFile)
+
+  await upsertWebProfileAccount(dshHome, 'default')
+
+  assert.deepEqual(
+    (await loadWebProfileConfig(dshHome)).accounts.map((account) => account.id),
+    ['default'],
+  )
+  assert.deepEqual(
+    (await readdir(path.dirname(profileFile))).filter((entry) => entry.includes('.lock')),
+    [],
+  )
 })
 
 test('账号配置迁移会移除旧的 profile 明文凭据覆盖', async (t) => {

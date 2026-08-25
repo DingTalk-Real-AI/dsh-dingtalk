@@ -4,7 +4,21 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { collectDiagnostics } from '../lib/diagnostics.js'
+import { collectDiagnostics, verifyDingTalkCredentials } from '../lib/diagnostics.js'
+
+test('凭据联网验证使用有上限的超时信号', async (t) => {
+  const originalFetch = globalThis.fetch
+  t.after(() => {
+    globalThis.fetch = originalFetch
+  })
+  globalThis.fetch = async (_url, init) => {
+    assert.ok(init?.signal instanceof AbortSignal)
+    assert.equal(init.signal.aborted, false)
+    return { ok: true }
+  }
+
+  assert.equal(await verifyDingTalkCredentials('client-private-value', 'secret-private-value'), true)
+})
 
 test('doctor 区分凭据、管理员绑定、文字审批和运行期卡片权限错误', async (t) => {
   const stateDir = await mkdtemp(path.join(os.tmpdir(), 'dsh-dingtalk-doctor-'))

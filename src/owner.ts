@@ -43,6 +43,7 @@ export interface OwnerBindingStatus {
   groupAccess: GroupAccess
   allowedGroupCount: number
   challengeReady: boolean
+  challengeExpiresAt?: number
 }
 
 function hashCode(salt: string, code: string): string {
@@ -158,6 +159,7 @@ export class OwnerBinding {
       groupAccess: this.groupAccess,
       allowedGroupCount: this.allowedGroups.size,
       challengeReady: Boolean(challenge && challenge.expiresAt >= this.now()),
+      ...(challenge ? { challengeExpiresAt: challenge.expiresAt } : {}),
     }
   }
 

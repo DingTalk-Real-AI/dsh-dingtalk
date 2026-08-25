@@ -81,6 +81,18 @@ export interface GuidedSetupResult {
   runDoctor?: boolean
 }
 
+export interface RunPrivateAccountSetupOptions extends RunGuidedSetupOptions {
+  accountId: string
+}
+
+export interface PrivateAccountSetupResult {
+  accountId: string
+  credentialsConfigured: boolean
+  bound: boolean
+  challengePrepared: boolean
+  challengeExpiresAt?: number
+}
+
 type SetupAction = 'full' | 'add-account' | 'credentials' | 'features' | 'binding' | 'doctor'
 
 function cleanVersion(output: string): string {
@@ -157,11 +169,13 @@ async function defaultOnboard(ui: SetupUi): Promise<Pick<DingTalkCredentials, 'c
 
 async function configureCredentials(options: RunGuidedSetupOptions, accountId: string): Promise<boolean> {
   const { ui, dshHome } = options
-  const current = await loadDingTalkAccountCredentials(dshHome, accountId)
+  const profile = await loadWebProfileConfig(dshHome)
+  const credentialRefs = profile.accounts.find((account) => account.id === accountId)
+  const current = await loadDingTalkAccountCredentials(dshHome, accountId, credentialRefs)
   if (accountId === DEFAULT_ACCOUNT_ID && current?.source === 'legacy-env') {
     const migrate = await ui.confirm('migrateLegacy', '检测到 ~/.dsh/.env 中的旧凭据，是否迁移到 DSH 凭据存储？', true)
     if (migrate) {
-      await saveDingTalkCredentials(dshHome, current)
+      await saveDingTalkAccountCredentials(dshHome, accountId, current, credentialRefs)
       await removeLegacyDingTalkCredentials(dshHome)
       ui.success('旧凭据已迁移，普通 .env 中的钉钉凭据已移除。')
       return true
@@ -184,7 +198,7 @@ async function configureCredentials(options: RunGuidedSetupOptions, accountId: s
           clientId: (await ui.text('clientId', 'Client ID（AppKey）')).trim(),
           clientSecret: (await ui.secret('clientSecret', 'Client Secret（AppSecret）')).trim(),
         }
-  await saveDingTalkAccountCredentials(dshHome, accountId, credentials)
+  await saveDingTalkAccountCredentials(dshHome, accountId, credentials, credentialRefs)
   await upsertWebProfileAccount(dshHome, accountId)
   ui.success(`钉钉机器人 ${accountId} 的应用凭据已安全写入 DSH 凭据存储。`)
   return true
@@ -346,6 +360,83 @@ function configureBinding(
       '口令已生成，但机器人要在 dsh web 启动且日志显示已连接后才能接收消息。请先在下方启动 dsh web；若选择稍后启动，请手动运行 dsh web 并确认已连接，再在 10 分钟内私聊该机器人发送口令。不要发到群聊。',
   )
   return true
+}
+
+/**
+ * AI Native setup 的私密人工接力：只处理凭据与管理员绑定口令。
+ *
+ * 这个入口不会安装依赖、修改功能选项或启动/重启 dsh web。Client Secret、
+ * 扫码链接与绑定口令只经过当前终端的 SetupUi，不能进入机器 JSON 或 checkpoint。
+ */
+export async function runPrivateAccountSetup(
+  options: RunPrivateAccountSetupOptions,
+): Promise<PrivateAccountSetupResult> {
+  const accountId = assertAccountId(options.accountId)
+  let profile = await loadWebProfileConfig(options.dshHome)
+  let account = profile.accounts.find((item) => item.id === accountId)
+  let credentials = await loadDingTalkAccountCredentials(options.dshHome, accountId, account)
+  let credentialsConfigured = false
+  if (!credentials) {
+    await configureCredentials(options, accountId)
+    credentialsConfigured = true
+    profile = await loadWebProfileConfig(options.dshHome)
+    account = profile.accounts.find((item) => item.id === accountId)
+    credentials = await loadDingTalkAccountCredentials(options.dshHome, accountId, account)
+  } else {
+    await upsertWebProfileAccount(options.dshHome, accountId)
+    options.ui.note(`机器人 ${accountId} 已有凭据；私密接力未修改现有 Client Secret。`)
+  }
+  if (!credentials) throw new Error('private-credentials-not-configured')
+
+  profile = await loadWebProfileConfig(options.dshHome)
+  account = profile.accounts.find((item) => item.id === accountId)
+  const bindingAccount = account ?? {
+    id: accountId,
+    enabled: true,
+    clientIdRef: '',
+    clientSecretRef: '',
+  }
+  const binding = ownerBinding(options.stateDir, bindingAccount)
+  const bindingStatus = binding.status()
+  if (bindingStatus.bound) {
+    options.ui.note(`机器人 ${accountId} 的唯一管理员已经绑定；私密接力未修改现有绑定。`)
+    return {
+      accountId,
+      credentialsConfigured,
+      bound: true,
+      challengePrepared: false,
+    }
+  }
+
+  if (bindingStatus.challengeReady) {
+    options.ui.note(
+      `机器人 ${accountId} 已有仍然有效的一次性管理员绑定口令；请继续使用上次在本机终端显示的口令，setup 不会提前使它失效。`,
+    )
+    return {
+      accountId,
+      credentialsConfigured,
+      bound: false,
+      challengePrepared: true,
+      ...(bindingStatus.challengeExpiresAt ? { challengeExpiresAt: bindingStatus.challengeExpiresAt } : {}),
+    }
+  }
+
+  // checkpoint 绝不保存明文口令；只有不存在有效 challenge 时才生成并现场展示新口令。
+  const challenge = issueBindingChallenge(
+    path.join(accountStateDir(options.stateDir, accountId), 'owner.json'),
+    10 * 60_000,
+  )
+  options.ui.note(
+    `机器人 ${accountId} 的一次性管理员绑定口令：\n\n/bind ${challenge.code}\n\n` +
+      '请启动 dsh web 并等待机器人连接后，在 10 分钟内私聊该机器人发送口令。不要把口令发到群聊或交给 AI。',
+  )
+  return {
+    accountId,
+    credentialsConfigured,
+    bound: false,
+    challengePrepared: true,
+    challengeExpiresAt: challenge.expiresAt,
+  }
 }
 
 function isRobotBound(

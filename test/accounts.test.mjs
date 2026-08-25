@@ -91,6 +91,39 @@ test('非法或重复账号标识会在启动前被拒绝', () => {
   )
 })
 
+test('运行时归一化拒绝无效或复用的凭据引用', () => {
+  const base = {
+    clientId: '',
+    clientSecret: '',
+    ownerStaffId: '',
+    groupAllowlist: [],
+  }
+
+  assert.throws(
+    () =>
+      configuredAccountSpecs({
+        ...base,
+        accounts: [{ id: 'same-ref', enabled: true, clientIdRef: 'SAME', clientSecretRef: 'SAME' }],
+      }),
+    /两个不同的有效凭据引用/,
+  )
+  assert.throws(
+    () =>
+      configuredAccountSpecs({
+        ...base,
+        accounts: [{ id: 'invalid-ref', enabled: true, clientIdRef: 'NOT-AN-ENV-REF' }],
+      }),
+    /两个不同的有效凭据引用/,
+  )
+  assert.deepEqual(
+    configuredAccountSpecs({
+      ...base,
+      accounts: [{ id: 'disabled-invalid-ref', enabled: false, clientIdRef: 'SAME', clientSecretRef: 'SAME' }],
+    }),
+    [],
+  )
+})
+
 test('运行时从各自凭据引用解析多个账号并跳过重复应用连接', async () => {
   const specs = configuredAccountSpecs({
     accounts: [

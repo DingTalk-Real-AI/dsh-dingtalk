@@ -2,8 +2,15 @@ import { randomUUID } from 'node:crypto'
 import { chmod, lstat, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { isMap, parse, parseDocument, stringify, YAMLMap } from 'yaml'
-import { accountCredentialRefs, assertAccountId, DEFAULT_ACCOUNT_ID, type AccountCredentialRefs } from './accounts.js'
+import {
+  accountCredentialRefs,
+  assertAccountCredentialRefs,
+  assertAccountId,
+  DEFAULT_ACCOUNT_ID,
+  type AccountCredentialRefs,
+} from './accounts.js'
 import type { DingTalkAppCredentials } from './credentials.js'
+import { withRecoverableFileLock } from './file-lock.js'
 
 export interface DingTalkCredentials extends DingTalkAppCredentials {
   source: 'credentials' | 'legacy-env'
@@ -249,7 +256,7 @@ async function atomicPrivateWrite(file: string, content: string): Promise<void> 
   await chmod(file, 0o600)
 }
 
-async function isCredentialLockContention(error: unknown, lockFile: string): Promise<boolean> {
+async function isFileLockContention(error: unknown, lockFile: string): Promise<boolean> {
   const code = (error as NodeJS.ErrnoException | null)?.code
   if (code === 'EEXIST') return true
   if (code !== 'EPERM') return false
@@ -261,8 +268,7 @@ async function isCredentialLockContention(error: unknown, lockFile: string): Pro
   }
 }
 
-// 与 DSH dsh-atomic-write 共用 `<凭据文件>.lock` 协议，确保双方的读改写不会互相覆盖。
-async function withCredentialFileLock<T>(file: string, operation: () => Promise<T>): Promise<T> {
+async function withFileLock<T>(file: string, label: string, operation: () => Promise<T>): Promise<T> {
   await mkdir(path.dirname(file), { recursive: true, mode: 0o700 })
   const lockFile = `${file}.lock`
   const deadline = Date.now() + 30_000
@@ -272,9 +278,9 @@ async function withCredentialFileLock<T>(file: string, operation: () => Promise<
       await writeFile(lockFile, `${process.pid}\n`, { mode: 0o600, flag: 'wx' })
       break
     } catch (error) {
-      if (!(await isCredentialLockContention(error, lockFile))) throw error
+      if (!(await isFileLockContention(error, lockFile))) throw error
     }
-    if (Date.now() >= deadline) throw new Error(`等待凭据文件写锁超时：${lockFile}`)
+    if (Date.now() >= deadline) throw new Error(`等待${label}写锁超时：${lockFile}`)
     await new Promise((resolve) => setTimeout(resolve, delay))
     delay = Math.min(delay * 2, 200)
   }
@@ -283,6 +289,15 @@ async function withCredentialFileLock<T>(file: string, operation: () => Promise<
   } finally {
     await rm(lockFile, { force: true })
   }
+}
+
+// 与 DSH dsh-atomic-write 共用 `<凭据文件>.lock` 协议，确保双方的读改写不会互相覆盖。
+async function withCredentialFileLock<T>(file: string, operation: () => Promise<T>): Promise<T> {
+  return withFileLock(file, '凭据文件', operation)
+}
+
+async function withWebProfileLock<T>(file: string, operation: () => Promise<T>): Promise<T> {
+  return withRecoverableFileLock(`${file}.lock`, operation, { label: 'web profile' })
 }
 
 function parseLegacyEnv(
@@ -310,6 +325,7 @@ export async function loadDingTalkAccountCredentials(
   accountId: string,
   credentialRefs: AccountCredentialRefs = accountCredentialRefs(accountId),
 ): Promise<DingTalkCredentials | undefined> {
+  assertAccountCredentialRefs(credentialRefs)
   const file = credentialsPath(dshHome)
   const source = await readOptional(file)
   if (source !== undefined) {
@@ -336,10 +352,12 @@ export async function saveDingTalkAccountCredentials(
   dshHome: string,
   accountId: string,
   credentials: Pick<DingTalkCredentials, 'clientId' | 'clientSecret'>,
+  credentialRefs: AccountCredentialRefs = accountCredentialRefs(accountId),
 ): Promise<string> {
   if (!credentials.clientId.trim() || !credentials.clientSecret.trim())
     throw new Error('Client ID 和 Client Secret 不能为空')
-  const refs = accountCredentialRefs(accountId)
+  const refs = credentialRefs
+  assertAccountCredentialRefs(refs)
   const file = credentialsPath(dshHome)
   return withCredentialFileLock(file, async () => {
     const existing = await readOptional(file)
@@ -382,17 +400,17 @@ async function writeWebProfile(
   await atomicPrivateWrite(file, stringify(entries, { lineWidth: 0 }))
 }
 
-export async function upsertWebProfileAccount(dshHome: string, accountId: string): Promise<string> {
-  const id = assertAccountId(accountId)
-  const file = path.join(dshHome, 'profiles', 'web', 'cordis.patch.yml')
-  const entries = profileEntries(await readOptional(file), file)
-  const { current, config } = ownedPluginConfig(entries)
+function upsertOwnedAccount(
+  config: Record<string, unknown>,
+  id: string,
+  options: { enable?: boolean } = {},
+): Record<string, unknown> {
   const accounts = Array.isArray(config.accounts)
     ? (config.accounts.filter(
         (item): item is Record<string, unknown> => typeof item === 'object' && item !== null && !Array.isArray(item),
       ) as Record<string, unknown>[])
     : []
-  const refs = accountCredentialRefs(id)
+  const fallbackRefs = accountCredentialRefs(id)
   const existing = accounts.find((account) => account.id === id)
   const inherited =
     id === DEFAULT_ACCOUNT_ID
@@ -417,15 +435,44 @@ export async function upsertWebProfileAccount(dshHome: string, accountId: string
           ...(config.sessionScope === 'chat-sender' ? { sessionScope: 'chat-sender' } : {}),
         }
       : {}
-  const next = { ...inherited, ...(existing ?? {}), id, enabled: existing?.enabled !== false, ...refs }
+  const clientIdRef =
+    typeof existing?.clientIdRef === 'string' && existing.clientIdRef ? existing.clientIdRef : fallbackRefs.clientIdRef
+  const clientSecretRef =
+    typeof existing?.clientSecretRef === 'string' && existing.clientSecretRef
+      ? existing.clientSecretRef
+      : fallbackRefs.clientSecretRef
+  assertAccountCredentialRefs({ clientIdRef, clientSecretRef })
+  const next = {
+    ...inherited,
+    ...(existing ?? {}),
+    id,
+    enabled: options.enable === true ? true : existing?.enabled !== false,
+    clientIdRef,
+    clientSecretRef,
+  }
   if (existing) Object.assign(existing, next)
   else accounts.push(next)
   config.accounts = accounts
   // setup 管理凭据引用后，旧的根级明文覆盖必须清除，否则会遮蔽凭据存储。
   delete config.clientId
   delete config.clientSecret
-  await writeWebProfile(file, entries, current, config)
-  return file
+  return existing ?? next
+}
+
+export async function upsertWebProfileAccount(
+  dshHome: string,
+  accountId: string,
+  options: { enable?: boolean } = {},
+): Promise<string> {
+  const id = assertAccountId(accountId)
+  const file = path.join(dshHome, 'profiles', 'web', 'cordis.patch.yml')
+  return withWebProfileLock(file, async () => {
+    const entries = profileEntries(await readOptional(file), file)
+    const { current, config } = ownedPluginConfig(entries)
+    upsertOwnedAccount(config, id, options)
+    await writeWebProfile(file, entries, current, config)
+    return file
+  })
 }
 
 export async function removeLegacyDingTalkCredentials(dshHome: string): Promise<void> {
@@ -441,23 +488,25 @@ export async function removeLegacyDingTalkCredentials(dshHome: string): Promise<
 
 export async function updateWebProfileConfig(dshHome: string, config: WebProfileUpdate): Promise<string> {
   const file = path.join(dshHome, 'profiles', 'web', 'cordis.patch.yml')
-  const entries = profileEntries(await readOptional(file), file)
-  const { current, config: ownedConfig } = ownedPluginConfig(entries)
-  ownedConfig.tools = { enabled: config.dwsEnabled }
-  ownedConfig.imageMode = config.imageMode
-  if (config.interactionCardTemplateId !== undefined) {
-    ownedConfig.interactionCardTemplateId = config.interactionCardTemplateId
-  }
-  if (config.senderAccess !== undefined) ownedConfig.senderAccess = config.senderAccess
-  if (config.allowedSenders !== undefined) ownedConfig.allowedSenders = config.allowedSenders
-  if (config.groupAccess !== undefined) ownedConfig.groupAccess = config.groupAccess
-  if (config.groupAllowlist !== undefined) ownedConfig.groupAllowlist = config.groupAllowlist
-  if (config.sessionScope !== undefined) ownedConfig.sessionScope = config.sessionScope
+  return withWebProfileLock(file, async () => {
+    const entries = profileEntries(await readOptional(file), file)
+    const { current, config: ownedConfig } = ownedPluginConfig(entries)
+    ownedConfig.tools = { enabled: config.dwsEnabled }
+    ownedConfig.imageMode = config.imageMode
+    if (config.interactionCardTemplateId !== undefined) {
+      ownedConfig.interactionCardTemplateId = config.interactionCardTemplateId
+    }
+    if (config.senderAccess !== undefined) ownedConfig.senderAccess = config.senderAccess
+    if (config.allowedSenders !== undefined) ownedConfig.allowedSenders = config.allowedSenders
+    if (config.groupAccess !== undefined) ownedConfig.groupAccess = config.groupAccess
+    if (config.groupAllowlist !== undefined) ownedConfig.groupAllowlist = config.groupAllowlist
+    if (config.sessionScope !== undefined) ownedConfig.sessionScope = config.sessionScope
 
-  delete ownedConfig.clientId
-  delete ownedConfig.clientSecret
-  await writeWebProfile(file, entries, current, ownedConfig)
-  return file
+    delete ownedConfig.clientId
+    delete ownedConfig.clientSecret
+    await writeWebProfile(file, entries, current, ownedConfig)
+    return file
+  })
 }
 
 export async function updateWebProfileAccountAccess(
@@ -466,16 +515,15 @@ export async function updateWebProfileAccountAccess(
   access: WebProfileAccountAccess,
 ): Promise<string> {
   const id = assertAccountId(accountId)
-  await upsertWebProfileAccount(dshHome, id)
   const file = path.join(dshHome, 'profiles', 'web', 'cordis.patch.yml')
-  const entries = profileEntries(await readOptional(file), file)
-  const { current, config } = ownedPluginConfig(entries)
-  const accounts = config.accounts as Record<string, unknown>[]
-  const account = accounts.find((item) => item.id === id)
-  if (!account) throw new Error(`钉钉机器人 ${id} 配置不存在`)
-  Object.assign(account, access)
-  await writeWebProfile(file, entries, current, config)
-  return file
+  return withWebProfileLock(file, async () => {
+    const entries = profileEntries(await readOptional(file), file)
+    const { current, config } = ownedPluginConfig(entries)
+    const account = upsertOwnedAccount(config, id)
+    Object.assign(account, access)
+    await writeWebProfile(file, entries, current, config)
+    return file
+  })
 }
 
 export async function loadWebProfileConfig(dshHome: string): Promise<WebProfileConfig> {
@@ -537,6 +585,7 @@ export async function loadWebProfileConfig(dshHome: string): Promise<WebProfileC
           clientSecretRef:
             typeof raw.clientSecretRef === 'string' && raw.clientSecretRef ? raw.clientSecretRef : refs.clientSecretRef,
         }
+        assertAccountCredentialRefs(account)
         if (typeof raw.ownerStaffId === 'string' && raw.ownerStaffId) account.ownerStaffId = raw.ownerStaffId
         if (raw.senderAccess === 'all' || raw.senderAccess === 'owner' || raw.senderAccess === 'allowlist')
           account.senderAccess = raw.senderAccess
