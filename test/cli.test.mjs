@@ -56,6 +56,8 @@ test('公开 setup CLI 在一个进程内完成插件安装和配置', async (t)
 
   assert.equal(result.status, 0, result.stderr || result.stdout)
   assert.match(result.stdout, /⏳ 正在安装 DSH web profile 插件…/)
+  assert.match(result.stdout, /✅ DSH web profile 插件安装完成/)
+  assert.doesNotMatch(result.stdout, /✅ 正在/)
   assert.match(result.stdout, /插件已安装到 DSH web profile/)
   assert.match(result.stdout, /\/bind [A-Z0-9]+/)
   assert.doesNotMatch(result.stdout, /secret-cli/)
@@ -66,6 +68,65 @@ test('公开 setup CLI 在一个进程内完成插件安装和配置', async (t)
     DINGTALK_CLIENT_ID: 'ding-cli',
     DINGTALK_CLIENT_SECRET: 'secret-cli',
   })
+})
+
+test('公开 setup CLI 用失败图标和摘要展示插件安装根因', async (t) => {
+  if (process.platform === 'win32') return
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-dingtalk-cli-failure-'))
+  t.after(() => import('node:fs/promises').then((fs) => fs.rm(root, { recursive: true, force: true })))
+  const bin = path.join(root, 'bin')
+  await import('node:fs/promises').then((fs) => fs.mkdir(bin, { recursive: true }))
+  await writeFile(
+    path.join(bin, 'dsh'),
+    [
+      '#!/bin/sh',
+      'if [ "$1" = "--version" ]; then echo 0.1.1-rc.2; exit 0; fi',
+      'pnpm "$4" "$5"',
+      'status=$?',
+      'echo "dsh: pnpm failed in profile directory $DSH_HOME/profiles/web" >&2',
+      'exit $status',
+      '',
+    ].join('\n'),
+  )
+  await writeFile(
+    path.join(bin, 'pnpm'),
+    [
+      '#!/bin/sh',
+      'if [ "$1" = "--version" ]; then echo 11.7.0; exit 0; fi',
+      'echo "Progress: resolved 20, reused 19, downloaded 0, added 0"',
+      'echo "[ERR_PNPM_NO_MATCHING_VERSION] No matching version found for @deepseek-ai/dsh-fs-local@^0.1.1-rc.2"',
+      'echo "while fetching it from https://packages.example.test/"',
+      'exit 1',
+      '',
+    ].join('\n'),
+  )
+  await chmod(path.join(bin, 'dsh'), 0o755)
+  await chmod(path.join(bin, 'pnpm'), 0o755)
+
+  const result = spawnSync(process.execPath, ['lib/bin.js', 'setup'], {
+    cwd: path.resolve('.'),
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      HOME: root,
+      DSH_HOME: path.join(root, '.dsh'),
+      DSH_DINGTALK_STATE_DIR: path.join(root, '.dsh-dingtalk'),
+      PATH: `${bin}${path.delimiter}${process.env.PATH ?? ''}`,
+    },
+    timeout: 10_000,
+  })
+
+  assert.equal(result.status, 1, result.stderr || result.stdout)
+  assert.match(result.stdout, /⏳ 正在安装 DSH web profile 插件…/)
+  assert.match(result.stdout, /❌ DSH web profile 插件安装失败/)
+  assert.doesNotMatch(result.stdout, /✅ 正在安装 DSH web profile 插件/)
+  assert.match(result.stderr, /错误码：ERR_PNPM_NO_MATCHING_VERSION/)
+  assert.match(result.stderr, /包：@deepseek-ai\/dsh-fs-local@\^0\.1\.1-rc\.2/)
+  assert.match(result.stderr, /Registry：https:\/\/packages\.example\.test\//)
+  assert.doesNotMatch(result.stderr, /Progress: resolved/)
+  const logPath = result.stderr.match(/完整日志：(.+)/)?.[1]
+  assert.ok(logPath)
+  assert.match(await readFile(logPath, 'utf8'), /Progress: resolved 20/)
 })
 
 test('doctor 识别 web profile 中显式配置的管理员', async (t) => {

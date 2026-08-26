@@ -1,6 +1,7 @@
 import path from 'node:path'
 
 import { accountStateDir, DEFAULT_ACCOUNT_ID } from './accounts.js'
+import { diagnoseCommandFailure, type InstallStage } from './install-diagnostics.js'
 import { OwnerBinding } from './owner.js'
 import {
   createSetupCheckpoint,
@@ -24,6 +25,7 @@ import {
 import {
   installedDshCredentialLayout,
   runPrivateAccountSetup,
+  type CommandResult,
   type CommandRunner,
   type RunGuidedSetupOptions,
   type SetupUi,
@@ -65,6 +67,14 @@ export interface MachineSetupError {
   code: 'approval_required' | 'command_failed' | 'configuration_failed' | 'dsh_upgrade_required' | 'environment_changed'
   stepId?: string
   approvalIds?: string[]
+  stage?: InstallStage
+  errorCode?: string
+  primaryMessage?: string
+  package?: string
+  registry?: string
+  dependency?: string
+  suggestedAction?: string
+  logPath?: string
 }
 
 export interface MachineSetupOutcome {
@@ -200,21 +210,59 @@ async function failStep(
   completed: Set<string>,
   stepId: string,
   code: MachineSetupError['code'],
+  details: Pick<
+    MachineSetupError,
+    'stage' | 'errorCode' | 'primaryMessage' | 'package' | 'registry' | 'dependency' | 'suggestedAction' | 'logPath'
+  > = {},
 ): Promise<MachineSetupOutcome> {
   const saved = await persistProgress(options, checkpoint, 'failed', completed)
-  return outcome(saved, 'failed', { error: { code, stepId } })
+  return outcome(saved, 'failed', { error: { code, stepId, ...details } })
 }
 
-function runCommand(runner: CommandRunner, command: string, args: string[]) {
+function runCommand(runner: CommandRunner, command: string, args: string[]): CommandResult {
   try {
     return runner.run(command, args)
-  } catch {
-    return undefined
+  } catch (error) {
+    return {
+      code: 127,
+      stdout: '',
+      stderr: error instanceof Error ? error.message : '子进程启动失败',
+    }
   }
 }
 
-function commandSucceeded(runner: CommandRunner, command: string, args: string[]): boolean {
-  return runCommand(runner, command, args)?.code === 0
+function installStage(stepId: 'install-dsh' | 'install-pnpm' | 'install-plugin'): InstallStage {
+  if (stepId === 'install-dsh') return 'dsh_install'
+  if (stepId === 'install-pnpm') return 'pnpm_install'
+  return 'plugin_install'
+}
+
+async function failCommandStep(
+  options: MachineSetupOptions,
+  checkpoint: SetupCheckpoint,
+  completed: Set<string>,
+  stepId: 'install-dsh' | 'install-pnpm' | 'install-plugin',
+  command: string,
+  args: string[],
+  result: CommandResult,
+): Promise<MachineSetupOutcome> {
+  const diagnostic = await diagnoseCommandFailure({
+    stage: installStage(stepId),
+    command,
+    args,
+    result,
+    stateDir: options.stateDir,
+  })
+  return failStep(options, checkpoint, completed, stepId, 'command_failed', {
+    stage: diagnostic.stage,
+    errorCode: diagnostic.errorCode,
+    primaryMessage: diagnostic.primaryMessage,
+    package: diagnostic.packageSpec,
+    registry: diagnostic.registry,
+    dependency: diagnostic.dependency,
+    suggestedAction: diagnostic.suggestedAction,
+    logPath: diagnostic.logPath,
+  })
 }
 
 function versionMajor(output: string): number {
@@ -324,32 +372,40 @@ async function continueMachineSetup(
 
   const actionIds = new Set(plan.actions.map((item) => item.id))
   if (actionIds.has('install-dsh') && !completed.has('install-dsh')) {
-    if (!commandSucceeded(options.runner, 'npm', ['install', '--global', '@deepseek-ai/dsh@latest'])) {
-      return failStep(options, checkpoint, completed, 'install-dsh', 'command_failed')
+    const args = ['install', '--global', '@deepseek-ai/dsh@latest']
+    const installedDsh = runCommand(options.runner, 'npm', args)
+    if (installedDsh.code !== 0) {
+      return failCommandStep(options, checkpoint, completed, 'install-dsh', 'npm', args, installedDsh)
     }
-    if (!commandSucceeded(options.runner, 'dsh', ['--version'])) {
-      return failStep(options, checkpoint, completed, 'install-dsh', 'command_failed')
+    const versionArgs = ['--version']
+    const installedVersion = runCommand(options.runner, 'dsh', versionArgs)
+    if (installedVersion.code !== 0) {
+      return failCommandStep(options, checkpoint, completed, 'install-dsh', 'dsh', versionArgs, installedVersion)
     }
     completed.add('install-dsh')
     checkpoint = await persistProgress(options, checkpoint, 'applying', completed)
   }
 
   if (actionIds.has('install-pnpm') && !completed.has('install-pnpm')) {
-    if (!commandSucceeded(options.runner, 'npm', ['install', '--global', 'pnpm@latest'])) {
-      return failStep(options, checkpoint, completed, 'install-pnpm', 'command_failed')
+    const args = ['install', '--global', 'pnpm@latest']
+    const installed = runCommand(options.runner, 'npm', args)
+    if (installed.code !== 0) {
+      return failCommandStep(options, checkpoint, completed, 'install-pnpm', 'npm', args, installed)
     }
     const installedPnpm = runCommand(options.runner, 'pnpm', ['--version'])
-    const installedPnpmMajor = installedPnpm ? versionMajor(installedPnpm.stdout) : Number.NaN
-    if (installedPnpm?.code !== 0 || !Number.isFinite(installedPnpmMajor) || installedPnpmMajor < 11) {
-      return failStep(options, checkpoint, completed, 'install-pnpm', 'command_failed')
+    const installedPnpmMajor = versionMajor(installedPnpm.stdout)
+    if (installedPnpm.code !== 0 || !Number.isFinite(installedPnpmMajor) || installedPnpmMajor < 11) {
+      return failCommandStep(options, checkpoint, completed, 'install-pnpm', 'pnpm', ['--version'], installedPnpm)
     }
     completed.add('install-pnpm')
     checkpoint = await persistProgress(options, checkpoint, 'applying', completed)
   }
 
   if (!completed.has('install-plugin')) {
-    if (!commandSucceeded(options.runner, 'dsh', ['plugin', '--profile', 'web', 'add', options.installSpec])) {
-      return failStep(options, checkpoint, completed, 'install-plugin', 'command_failed')
+    const args = ['plugin', '--profile', 'web', 'add', options.installSpec]
+    const installed = runCommand(options.runner, 'dsh', args)
+    if (installed.code !== 0) {
+      return failCommandStep(options, checkpoint, completed, 'install-plugin', 'dsh', args, installed)
     }
     completed.add('install-plugin')
     checkpoint = await persistProgress(options, checkpoint, 'applying', completed)

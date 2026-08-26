@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile } from 'node:fs/promises'
+import { mkdtemp, readFile, stat } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -94,6 +94,93 @@ class OldPnpmRunner extends FakeRunner {
   }
 }
 
+class PluginFailureRunner extends FakeRunner {
+  run(command, args) {
+    if (command === 'dsh' && args[0] === 'plugin') {
+      this.calls.push([command, ...args])
+      return { code: 1, stdout: '', stderr: 'plugin install failed' }
+    }
+    return super.run(command, args)
+  }
+}
+
+class PluginPnpmFailureRunner extends FakeRunner {
+  run(command, args) {
+    if (command === 'dsh' && args[0] === 'plugin') {
+      this.calls.push([command, ...args])
+      return {
+        code: 1,
+        stdout: [
+          'Progress: resolved 20, reused 19, downloaded 0, added 0',
+          '[ERR_PNPM_NO_MATCHING_VERSION] No matching version found for @deepseek-ai/dsh-fs-local@^0.1.1-rc.2',
+          'while fetching it from https://build-user:private-secret@packages.example.test/',
+          'This error happened while installing the dependencies of @deepseek-ai/dsh-base@0.1.1-rc.2',
+          '',
+        ].join('\n'),
+        stderr: [
+          'dsh: initialized profile web at /tmp/.dsh/profiles/web',
+          'dsh: pnpm failed in profile directory /tmp/.dsh/profiles/web',
+          '',
+        ].join('\n'),
+      }
+    }
+    return super.run(command, args)
+  }
+}
+
+class CategorizedPluginFailureRunner extends FakeRunner {
+  constructor(stderr) {
+    super()
+    this.stderr = stderr
+  }
+
+  run(command, args) {
+    if (command === 'dsh' && args[0] === 'plugin') {
+      this.calls.push([command, ...args])
+      return { code: 1, stdout: '', stderr: this.stderr }
+    }
+    return super.run(command, args)
+  }
+}
+
+class BootstrapInstallFailureRunner extends FakeRunner {
+  constructor(stage) {
+    super()
+    this.stage = stage
+  }
+
+  run(command, args) {
+    if (this.stage === 'dsh_install' && command === 'dsh' && args[0] === '--version') {
+      this.calls.push([command, ...args])
+      return { code: 127, stdout: '', stderr: 'command not found' }
+    }
+    if (this.stage === 'pnpm_install' && command === 'pnpm' && args[0] === '--version') {
+      this.calls.push([command, ...args])
+      return { code: 0, stdout: '9.5.0\n', stderr: '' }
+    }
+    if (command === 'npm' && args[0] === 'install') {
+      this.calls.push([command, ...args])
+      return {
+        code: 1,
+        stdout: 'npm progress noise\n',
+        stderr: 'npm error code ETARGET\nnpm error notarget No matching version found for bootstrap-package@1.2.3.\n',
+      }
+    }
+    return super.run(command, args)
+  }
+}
+
+class LoadingOutcomeUi extends FakeUi {
+  loadingOutcomes = []
+
+  loading(message) {
+    this.messages.push(`开始加载：${message}`)
+    return (succeeded, completedMessage) => {
+      this.loadingOutcomes.push({ message, succeeded, completedMessage })
+    }
+  }
+}
+
 class SwitchingDshRunner extends FakeRunner {
   dshChecks = 0
   run(command, args) {
@@ -114,6 +201,117 @@ test('setup 按实际 DSH 版本选择凭据文档格式', () => {
   assert.equal(credentialLayoutForDshVersion('0.1.1'), 'v1')
   assert.equal(credentialLayoutForDshVersion('1.0.0'), 'v1')
   assert.throws(() => credentialLayoutForDshVersion('not-a-version'), /无法识别 DSH 版本/)
+})
+
+test('插件安装失败时 loading 以失败态和完成态文案收尾', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-dingtalk-plugin-loading-failure-'))
+  t.after(() => import('node:fs/promises').then((fs) => fs.rm(root, { recursive: true, force: true })))
+  const ui = new LoadingOutcomeUi()
+
+  const result = await runGuidedSetup({
+    ui,
+    runner: new PluginFailureRunner(),
+    dshHome: path.join(root, '.dsh'),
+    stateDir: path.join(root, '.dsh-dingtalk'),
+    installSpec: '@dingtalk-real-ai/dsh-dingtalk@0.6.0',
+  })
+
+  assert.equal(result.code, 1)
+  assert.deepEqual(ui.loadingOutcomes.at(-1), {
+    message: '正在安装 DSH web profile 插件…',
+    succeeded: false,
+    completedMessage: 'DSH web profile 插件安装失败',
+  })
+})
+
+test('插件安装失败时提取 pnpm 根因并保留完整日志', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-dingtalk-plugin-diagnostic-'))
+  t.after(() => import('node:fs/promises').then((fs) => fs.rm(root, { recursive: true, force: true })))
+  const stateDir = path.join(root, '.dsh-dingtalk')
+  const ui = new FakeUi()
+
+  const result = await runGuidedSetup({
+    ui,
+    runner: new PluginPnpmFailureRunner(),
+    dshHome: path.join(root, '.dsh'),
+    stateDir,
+    installSpec: '@dingtalk-real-ai/dsh-dingtalk@0.6.0',
+  })
+
+  assert.equal(result.code, 1)
+  const displayed = ui.messages.join('\n')
+  assert.match(displayed, /插件安装失败/)
+  assert.match(displayed, /错误码：ERR_PNPM_NO_MATCHING_VERSION/)
+  assert.match(displayed, /包：@deepseek-ai\/dsh-fs-local@\^0\.1\.1-rc\.2/)
+  assert.match(displayed, /Registry：https:\/\/packages\.example\.test\//)
+  assert.match(displayed, /依赖：@deepseek-ai\/dsh-base@0\.1\.1-rc\.2/)
+  assert.doesNotMatch(displayed, /private-secret/)
+  assert.match(displayed, /建议：当前 registry 可能缺少该版本/)
+  assert.doesNotMatch(displayed, /Progress: resolved/)
+
+  const logPath = displayed.match(/完整日志：(.+)/)?.[1]
+  assert.ok(logPath)
+  assert.match(logPath, new RegExp(`^${path.join(stateDir, 'logs').replaceAll('\\', '\\\\')}`))
+  const log = await readFile(logPath, 'utf8')
+  assert.match(log, /Progress: resolved 20/)
+  assert.match(log, /dsh: pnpm failed in profile directory/)
+  assert.doesNotMatch(log, /private-secret/)
+  if (process.platform !== 'win32') assert.equal((await stat(logPath)).mode & 0o777, 0o600)
+})
+
+test('安装失败按权限、网络和磁盘错误给出可执行建议', async (t) => {
+  const cases = [
+    ['npm error code EACCES\nnpm error permission denied', /检查 npm 全局目录和目标目录权限/],
+    ['npm error code ENOTFOUND\nnpm error network registry unavailable', /检查网络、代理、DNS 和 registry 可达性/],
+    ['npm error code ENOSPC\nnpm error no space left on device', /清理磁盘空间后重试/],
+  ]
+
+  for (const [stderr, suggestion] of cases) {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-dingtalk-categorized-diagnostic-'))
+    t.after(() => import('node:fs/promises').then((fs) => fs.rm(root, { recursive: true, force: true })))
+    const ui = new FakeUi()
+    const result = await runGuidedSetup({
+      ui,
+      runner: new CategorizedPluginFailureRunner(stderr),
+      dshHome: path.join(root, '.dsh'),
+      stateDir: path.join(root, '.dsh-dingtalk'),
+      installSpec: '@dingtalk-real-ai/dsh-dingtalk@0.6.0',
+    })
+
+    assert.equal(result.code, 1)
+    assert.match(ui.messages.join('\n'), suggestion)
+  }
+})
+
+test('DSH 与 pnpm 安装失败共用结构化摘要和完整日志', async (t) => {
+  const cases = [
+    ['dsh_install', /DSH 安装失败/],
+    ['pnpm_install', /pnpm 安装失败/],
+  ]
+
+  for (const [stage, title] of cases) {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-dingtalk-bootstrap-diagnostic-'))
+    t.after(() => import('node:fs/promises').then((fs) => fs.rm(root, { recursive: true, force: true })))
+    const ui = new FakeUi()
+    const result = await runGuidedSetup({
+      ui,
+      runner: new BootstrapInstallFailureRunner(stage),
+      dshHome: path.join(root, '.dsh'),
+      stateDir: path.join(root, '.dsh-dingtalk'),
+      installSpec: '@dingtalk-real-ai/dsh-dingtalk@0.6.0',
+    })
+
+    assert.equal(result.code, 2)
+    const displayed = ui.messages.join('\n')
+    assert.match(displayed, title)
+    assert.match(displayed, new RegExp(`阶段：${stage}`))
+    assert.match(displayed, /错误码：ETARGET/)
+    assert.match(displayed, /包：bootstrap-package@1\.2\.3/)
+    assert.doesNotMatch(displayed, /npm progress noise/)
+    const logPath = displayed.match(/完整日志：(.+)/)?.[1]
+    assert.ok(logPath)
+    assert.match(await readFile(logPath, 'utf8'), /npm progress noise/)
+  }
 })
 
 test('setup 在交互完成后的实际写入点重新探测 DSH 版本', async (t) => {
