@@ -2,6 +2,7 @@ import path from 'node:path'
 
 import { accountStateDir, assertAccountId, DEFAULT_ACCOUNT_ID } from './accounts.js'
 import { collectDiagnostics } from './diagnostics.js'
+import { diagnoseCommandFailure, formatInstallFailure } from './install-diagnostics.js'
 import { isSupportedNodeVersion } from './node-version.js'
 import { beginRegistration, renderQr, waitForCredentials } from './onboard.js'
 import { issueBindingChallenge, OwnerBinding } from './owner.js'
@@ -44,7 +45,7 @@ export interface SetupUi {
   note(message: string): void
   warn(message: string): void
   success(message: string): void
-  loading(message: string): () => void
+  loading(message: string): (succeeded: boolean, completedMessage: string) => void
   confirm(id: string, message: string, initial: boolean): Promise<boolean>
   select<T extends string>(id: string, message: string, options: readonly SelectOption<T>[], initial: T): Promise<T>
   text(id: string, message: string): Promise<string>
@@ -55,15 +56,18 @@ export interface SetupUi {
 async function runWithLoading(
   ui: SetupUi,
   runner: CommandRunner,
-  message: string,
+  messages: { running: string; succeeded: string; failed: string },
   command: string,
   args: string[],
 ): Promise<CommandResult> {
-  const stopLoading = ui.loading(message)
+  const stopLoading = ui.loading(messages.running)
   try {
-    return runner.run(command, args)
-  } finally {
-    stopLoading()
+    const result = runner.run(command, args)
+    stopLoading(result.code === 0, result.code === 0 ? messages.succeeded : messages.failed)
+    return result
+  } catch (error) {
+    stopLoading(false, messages.failed)
+    throw error
   }
 }
 
@@ -164,20 +168,53 @@ export function installedDshCredentialLayout(runner: CommandRunner): CredentialD
   return credentialLayoutForDshVersion(version)
 }
 
-async function ensureDshInstalled(ui: SetupUi, runner: CommandRunner): Promise<boolean> {
-  let installed = await runWithLoading(ui, runner, '正在检查 DeepSeek Harness…', 'dsh', ['--version'])
+async function ensureDshInstalled(ui: SetupUi, runner: CommandRunner, stateDir: string): Promise<boolean> {
+  let installed = await runWithLoading(
+    ui,
+    runner,
+    {
+      running: '正在检查 DeepSeek Harness…',
+      succeeded: 'DeepSeek Harness 检查完成',
+      failed: '未检测到 DeepSeek Harness',
+    },
+    'dsh',
+    ['--version'],
+  )
   if (installed.code !== 0) {
     if (!(await ui.confirm('installDsh', '未检测到 DeepSeek Harness，是否安装最新版？', true))) return false
-    const install = await runWithLoading(ui, runner, '正在安装最新版 DeepSeek Harness…', 'npm', [
-      'install',
-      '--global',
-      '@deepseek-ai/dsh@latest',
-    ])
+    const install = await runWithLoading(
+      ui,
+      runner,
+      {
+        running: '正在安装最新版 DeepSeek Harness…',
+        succeeded: '最新版 DeepSeek Harness 安装完成',
+        failed: 'DeepSeek Harness 安装失败',
+      },
+      'npm',
+      ['install', '--global', '@deepseek-ai/dsh@latest'],
+    )
     if (install.code !== 0) {
-      ui.warn(`DSH 安装失败：${install.stderr.trim() || 'npm 返回非零状态'}`)
+      const diagnostic = await diagnoseCommandFailure({
+        stage: 'dsh_install',
+        command: 'npm',
+        args: ['install', '--global', '@deepseek-ai/dsh@latest'],
+        result: install,
+        stateDir,
+      })
+      ui.warn(formatInstallFailure('DSH 安装失败', diagnostic))
       return false
     }
-    installed = await runWithLoading(ui, runner, '正在确认 DeepSeek Harness 安装结果…', 'dsh', ['--version'])
+    installed = await runWithLoading(
+      ui,
+      runner,
+      {
+        running: '正在确认 DeepSeek Harness 安装结果…',
+        succeeded: 'DeepSeek Harness 安装结果确认完成',
+        failed: 'DeepSeek Harness 安装结果确认失败',
+      },
+      'dsh',
+      ['--version'],
+    )
     if (installed.code !== 0) {
       ui.warn('DSH 安装完成后仍无法执行，请检查全局 npm bin 是否在 PATH。')
       return false
@@ -187,8 +224,14 @@ async function ensureDshInstalled(ui: SetupUi, runner: CommandRunner): Promise<b
   return true
 }
 
-async function ensurePnpm(ui: SetupUi, runner: CommandRunner): Promise<boolean> {
-  let current = await runWithLoading(ui, runner, '正在检查 pnpm 版本…', 'pnpm', ['--version'])
+async function ensurePnpm(ui: SetupUi, runner: CommandRunner, stateDir: string): Promise<boolean> {
+  let current = await runWithLoading(
+    ui,
+    runner,
+    { running: '正在检查 pnpm 版本…', succeeded: 'pnpm 版本检查完成', failed: 'pnpm 版本检查失败' },
+    'pnpm',
+    ['--version'],
+  )
   const major = Number(cleanVersion(current.stdout).split('.')[0])
   if (current.code === 0 && Number.isFinite(major) && major >= 11) return true
 
@@ -200,16 +243,31 @@ async function ensurePnpm(ui: SetupUi, runner: CommandRunner): Promise<boolean> 
   )
   if (!install) return false
 
-  const installed = await runWithLoading(ui, runner, '正在安装最新版 pnpm…', 'npm', [
-    'install',
-    '--global',
-    'pnpm@latest',
-  ])
+  const installed = await runWithLoading(
+    ui,
+    runner,
+    { running: '正在安装最新版 pnpm…', succeeded: '最新版 pnpm 安装完成', failed: 'pnpm 安装失败' },
+    'npm',
+    ['install', '--global', 'pnpm@latest'],
+  )
   if (installed.code !== 0) {
-    ui.warn(`pnpm 安装失败：${installed.stderr.trim() || 'npm 返回非零状态'}`)
+    const diagnostic = await diagnoseCommandFailure({
+      stage: 'pnpm_install',
+      command: 'npm',
+      args: ['install', '--global', 'pnpm@latest'],
+      result: installed,
+      stateDir,
+    })
+    ui.warn(formatInstallFailure('pnpm 安装失败', diagnostic))
     return false
   }
-  current = await runWithLoading(ui, runner, '正在确认 pnpm 安装结果…', 'pnpm', ['--version'])
+  current = await runWithLoading(
+    ui,
+    runner,
+    { running: '正在确认 pnpm 安装结果…', succeeded: 'pnpm 安装结果确认完成', failed: 'pnpm 安装结果确认失败' },
+    'pnpm',
+    ['--version'],
+  )
   if (current.code !== 0 || Number(cleanVersion(current.stdout).split('.')[0]) < 11) {
     ui.warn('pnpm 安装后仍不可用或版本过旧，请检查全局 npm bin 和 PATH。')
     return false
@@ -372,15 +430,22 @@ async function configureFeatures(
   await updateWebProfileConfig(dshHome, { dwsEnabled, imageMode })
   await configureAccess(options, accountId, defaultAccessToAll)
   if (dwsEnabled) {
-    const version = await runWithLoading(ui, runner, '正在检查 DWS CLI…', 'dws', ['--version'])
+    const version = await runWithLoading(
+      ui,
+      runner,
+      { running: '正在检查 DWS CLI…', succeeded: 'DWS CLI 检查完成', failed: 'DWS CLI 检查失败' },
+      'dws',
+      ['--version'],
+    )
     if (version.code !== 0) ui.warn('已开启 DWS，但本机未检测到 dws CLI；钉钉消息能力不受影响。')
     else {
-      const auth = await runWithLoading(ui, runner, '正在检查 DWS 登录状态…', 'dws', [
-        'auth',
-        'status',
-        '--format',
-        'json',
-      ])
+      const auth = await runWithLoading(
+        ui,
+        runner,
+        { running: '正在检查 DWS 登录状态…', succeeded: 'DWS 登录状态检查完成', failed: 'DWS 登录状态检查失败' },
+        'dws',
+        ['auth', 'status', '--format', 'json'],
+      )
       if (auth.code !== 0) ui.warn('DWS 尚未登录；请稍后执行 dws auth login。')
     }
   }
@@ -555,18 +620,29 @@ export async function runGuidedSetup(options: RunGuidedSetupOptions): Promise<Gu
     ui.warn(`当前 Node.js ${process.versions.node}，要求 ^22.19.0 或 >=24.0.0。`)
     return { code: 2, startWeb: false }
   }
-  if (!(await ensureDshInstalled(ui, runner))) return { code: 2, startWeb: false }
-  if (!(await ensurePnpm(ui, runner))) return { code: 2, startWeb: false }
+  if (!(await ensureDshInstalled(ui, runner, stateDir))) return { code: 2, startWeb: false }
+  if (!(await ensurePnpm(ui, runner, stateDir))) return { code: 2, startWeb: false }
 
-  const installed = await runWithLoading(ui, runner, '正在安装 DSH web profile 插件…', 'dsh', [
-    'plugin',
-    '--profile',
-    'web',
-    'add',
-    installSpec,
-  ])
+  const installed = await runWithLoading(
+    ui,
+    runner,
+    {
+      running: '正在安装 DSH web profile 插件…',
+      succeeded: 'DSH web profile 插件安装完成',
+      failed: 'DSH web profile 插件安装失败',
+    },
+    'dsh',
+    ['plugin', '--profile', 'web', 'add', installSpec],
+  )
   if (installed.code !== 0) {
-    ui.warn(`插件安装失败：${installed.stderr.trim() || 'dsh plugin 返回非零状态'}`)
+    const diagnostic = await diagnoseCommandFailure({
+      stage: 'plugin_install',
+      command: 'dsh',
+      args: ['plugin', '--profile', 'web', 'add', installSpec],
+      result: installed,
+      stateDir,
+    })
+    ui.warn(formatInstallFailure('插件安装失败', diagnostic))
     return { code: 1, startWeb: false }
   }
   ui.success(`插件已安装到 DSH web profile：${installSpec}`)

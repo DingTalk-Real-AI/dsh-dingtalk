@@ -311,10 +311,17 @@ test('私密 resume 也拒绝改用 checkpoint 未批准的插件版本', async 
   await assert.rejects(() => stat(path.join(setupOptions.stateDir, 'owner.json')), { code: 'ENOENT' })
 })
 
-test('机器 setup 不把子进程错误原文带入结果或检查点', async (t) => {
+test('机器 setup 返回结构化安装诊断且不泄露子进程原文', async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-dingtalk-machine-error-'))
   t.after(() => import('node:fs/promises').then((fs) => fs.rm(root, { recursive: true, force: true })))
-  const runner = new FakeRunner({ pluginFailure: 'remote said private-secret' })
+  const runner = new FakeRunner({
+    pluginFailure: [
+      '[ERR_PNPM_NO_MATCHING_VERSION] No matching version found for @deepseek-ai/dsh-fs-local@^0.1.1-rc.2',
+      'while fetching it from https://build-user:private-secret@packages.example.test/',
+      'This error happened while installing the dependencies of @deepseek-ai/dsh-base@0.1.1-rc.2',
+      'npm error authToken=private-secret',
+    ].join('\n'),
+  })
   const setupOptions = options(root, runner)
   const plan = await planMachineSetup(setupOptions, { accountId: 'default' })
 
@@ -323,7 +330,16 @@ test('机器 setup 不把子进程错误原文带入结果或检查点', async (
   assert.equal(result.status, 'failed')
   assert.equal(result.error?.code, 'command_failed')
   assert.equal(result.error?.stepId, 'install-plugin')
+  assert.equal(result.error?.stage, 'plugin_install')
+  assert.equal(result.error?.errorCode, 'ERR_PNPM_NO_MATCHING_VERSION')
+  assert.match(result.error?.primaryMessage ?? '', /No matching version found/)
+  assert.equal(result.error?.package, '@deepseek-ai/dsh-fs-local@^0.1.1-rc.2')
+  assert.equal(result.error?.registry, 'https://packages.example.test/')
+  assert.equal(result.error?.dependency, '@deepseek-ai/dsh-base@0.1.1-rc.2')
+  assert.match(result.error?.suggestedAction ?? '', /当前 registry 可能缺少该版本/)
+  assert.match(result.error?.logPath ?? '', /[/\\]logs[/\\]setup-.+plugin_install-.+\.log$/)
   assert.doesNotMatch(JSON.stringify(result), /private-secret/)
+  assert.doesNotMatch(await readFile(result.error.logPath, 'utf8'), /private-secret/)
   const checkpointText = await readFile(
     path.join(setupOptions.stateDir, 'setup', 'checkpoints', `${result.checkpointId}.json`),
     'utf8',

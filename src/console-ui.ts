@@ -32,9 +32,9 @@ export class ConsoleSetupUi implements SetupUi {
     console.log(`✅ ${message}`)
   }
 
-  loading(message: string): () => void {
+  loading(message: string): (succeeded: boolean, completedMessage: string) => void {
     console.log(`⏳ ${message}`)
-    return () => console.log(`✅ ${message}`)
+    return (succeeded, completedMessage) => console.log(`${succeeded ? '✅' : '❌'} ${completedMessage}`)
   }
 
   async confirm(_id: string, message: string, initial: boolean): Promise<boolean> {
