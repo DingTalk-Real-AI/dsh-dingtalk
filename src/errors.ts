@@ -11,6 +11,13 @@ interface Rule {
   hint?: string
 }
 
+const CODE_RULES: Record<string, Omit<Rule, 'pattern'>> = {
+  MISSING_CREDENTIAL: {
+    label: '模型凭据未配置',
+    hint: '打开 dsh web 的 Models 页面补充对应模型凭据后重试',
+  },
+}
+
 const RULES: Rule[] = [
   { pattern: /\{\{model\}\}/, label: '会话未配置模型路由', hint: '用 /model use <provider>/<model> 指定后重试' },
   { pattern: /timed?.?out|ETIMEDOUT|deadline/i, label: '模型响应超时', hint: '稍后重发即可' },
@@ -38,12 +45,17 @@ const RULES: Rule[] = [
   { pattern: /5\d\d|internal server|service unavailable|无通道/i, label: '模型服务端错误', hint: '稍后重发即可' },
 ]
 
-/** Render a turn-ending error as a classified, actionable Chinese line. */
-export function describeTurnError(raw: string | undefined): string {
-  const message = (raw ?? '').trim() || 'unknown error'
-  const rule = RULES.find((r) => r.pattern.test(message))
+/** Render a turn-ending error as a classified, actionable Chinese message. */
+export function describeTurnError(raw: string | undefined, code?: string): string {
+  const message = (raw ?? '').trim()
+  const normalizedCode = (code ?? '').trim()
+  if (!message && !normalizedCode) return '⚠️ 本次回复失败，请查看 dsh web 日志'
+
+  const rule = CODE_RULES[normalizedCode] ?? RULES.find((candidate) => candidate.pattern.test(message))
   const label = rule?.label ?? '本轮执行出错'
   const hint = rule?.hint ? `（${rule.hint}）` : ''
-  const detail = message.length > 200 ? `${message.slice(0, 200)}…` : message
-  return `⚠️ **${label}**${hint}\n> ${detail}`
+  const lines = [`⚠️ **${label}**${hint}`]
+  if (normalizedCode) lines.push(`> 错误码：\`${normalizedCode}\``)
+  if (message) lines.push(`> ${message}`)
+  return lines.join('\n')
 }
