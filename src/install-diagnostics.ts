@@ -54,6 +54,7 @@ function extractErrorCode(output: string): string | undefined {
   if (bracketed) return bracketed
   const npmCode = output.match(/npm\s+(?:error|ERR!)\s+code\s+([A-Z][A-Z0-9_]*)/iu)?.[1]
   if (npmCode) return npmCode.toUpperCase()
+  if (/npm\s+(?:error|ERR!)\s+notarget\b/iu.test(output)) return 'ETARGET'
   return KNOWN_ERROR_CODES.find((code) => new RegExp(`(?:^|\\s)${code}(?:\\s|:|$)`, 'mu').test(output))
 }
 
@@ -113,7 +114,7 @@ function extractPrimaryMessage(output: string): string {
 
 function suggestedAction(errorCode: string | undefined): string {
   if (errorCode === 'ETARGET' || errorCode === 'ERR_PNPM_NO_MATCHING_VERSION') {
-    return '当前 registry 可能缺少该版本，请确认包版本和 registry 配置，必要时切换 registry 后重试。'
+    return '当前 registry 可能缺少该版本。可用 npm_config_registry=<可用 registry> npx @dingtalk-real-ai/dsh-dingtalk@latest setup 重试；setup 会把该 registry 同步给 DSH 内部的 pnpm。也可在 ~/.dsh/profiles/web/.npmrc（自定义 DSH_HOME 时使用 $DSH_HOME/profiles/web/.npmrc）写入 registry=<可用 registry>。'
   }
   if (errorCode === 'E401' || errorCode === 'E403') {
     return '请检查 registry 登录状态和包访问权限后重试。'

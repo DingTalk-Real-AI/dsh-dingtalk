@@ -120,6 +120,25 @@ The guide checks DSH and pnpm, asks before installing a missing or incompatible 
 
 `npx` runs the CLI for this invocation and does not add `dsh-dingtalk` to PATH. New accounts initially allow all senders and groups; for personal use, prefer owner-only sender access and no group access, then expand deliberately.
 
+### Enterprise private npm registries
+
+While DSH is in prerelease, the registry must contain the matching prerelease versions of the main package and all of its child packages. Enterprise registries such as Nexus, Verdaccio, or self-hosted cnpm can fail with `ETARGET`, `notarget`, or `ERR_PNPM_NO_MATCHING_VERSION` when only some packages have synchronized. This means the selected registry is missing a required version; it is not a connector configuration error.
+
+Before installing the plugin, setup reads `npm config get registry` and writes the registry without URL-embedded credentials to `$DSH_HOME/profiles/web/.npmrc` (default: `~/.dsh/profiles/web/.npmrc`). This keeps the outer npm process and the pnpm process launched by DSH on the same registry while preserving scoped registries, authentication, and other existing `.npmrc` settings. If the enterprise registry is incomplete, retry once with a registry that has the complete package set; the override now also reaches the later pnpm step:
+
+```bash
+npm_config_registry=https://registry.npmjs.org npx @dingtalk-real-ai/dsh-dingtalk@latest setup
+```
+
+You can also set and verify the web profile's project-level registry manually. Replace the directory when using a custom `DSH_HOME`:
+
+```bash
+mkdir -p ~/.dsh/profiles/web
+cd ~/.dsh/profiles/web
+npm config set registry https://registry.npmjs.org --location=project
+pnpm config get registry
+```
+
 ## How to use it: manual steps or assisted execution
 
 You can mix both modes, and you always start the task:

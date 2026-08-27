@@ -2,6 +2,7 @@ import path from 'node:path'
 
 import { accountStateDir, DEFAULT_ACCOUNT_ID } from './accounts.js'
 import { diagnoseCommandFailure, type InstallStage } from './install-diagnostics.js'
+import { syncWebProfileNpmRegistry } from './npm-registry.js'
 import { OwnerBinding } from './owner.js'
 import {
   createSetupCheckpoint,
@@ -402,6 +403,13 @@ async function continueMachineSetup(
   }
 
   if (!completed.has('install-plugin')) {
+    try {
+      await syncWebProfileNpmRegistry(options.dshHome, options.runner)
+    } catch (error) {
+      return failStep(options, checkpoint, completed, 'install-plugin', 'configuration_failed', {
+        primaryMessage: error instanceof Error ? error.message : '无法同步 npm registry 到 DSH web profile',
+      })
+    }
     const args = ['plugin', '--profile', 'web', 'add', options.installSpec]
     const installed = runCommand(options.runner, 'dsh', args)
     if (installed.code !== 0) {

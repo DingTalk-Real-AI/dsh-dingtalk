@@ -22,11 +22,13 @@ class FakeRunner {
     pnpmVersion = '11.7.0',
     installedPnpmVersion = '11.7.0',
     pluginFailure = '',
+    registry = 'https://registry.npmjs.org/',
   } = {}) {
     this.dshInstalled = dshInstalled
     this.pnpmVersion = pnpmVersion
     this.installedPnpmVersion = installedPnpmVersion
     this.pluginFailure = pluginFailure
+    this.registry = registry
   }
 
   run(command, args) {
@@ -43,6 +45,9 @@ class FakeRunner {
       return this.pluginFailure
         ? { code: 1, stdout: '', stderr: this.pluginFailure }
         : { code: 0, stdout: '', stderr: '' }
+    }
+    if (command === 'npm' && args.join(' ') === 'config get registry') {
+      return { code: 0, stdout: `${this.registry}\n`, stderr: '' }
     }
     if (command === 'npm' && args[0] === 'install') {
       if (args.at(-1) === '@deepseek-ai/dsh@latest') this.dshInstalled = true
@@ -154,8 +159,13 @@ test('机器 setup 只执行显式批准的步骤，并在私密凭据前安全�
   assert.equal(result.next?.kind, 'private_command')
   assert.match(result.next?.command ?? '', /^npx @dingtalk-real-ai\/dsh-dingtalk@0\.5\.2 setup --resume [0-9a-f-]+$/)
   assert.deepEqual(
-    runner.calls.filter((call) => call[0] === 'npm'),
+    runner.calls.filter((call) => call[0] === 'npm' && call[1] === 'install'),
     [],
+  )
+  assert.equal(
+    runner.calls.findIndex((call) => call.join(' ') === 'npm config get registry') <
+      runner.calls.findIndex((call) => call[0] === 'dsh' && call[1] === 'plugin'),
+    true,
   )
   assert.deepEqual(
     runner.calls.find((call) => call[0] === 'dsh' && call[1] === 'plugin'),
@@ -170,6 +180,10 @@ test('机器 setup 只执行显式批准的步骤，并在私密凭据前安全�
   const profile = await readFile(path.join(setupOptions.dshHome, 'profiles', 'web', 'cordis.patch.yml'), 'utf8')
   assert.match(profile, /id: default/)
   assert.match(profile, /enabled: true/)
+  assert.equal(
+    await readFile(path.join(setupOptions.dshHome, 'profiles', 'web', '.npmrc'), 'utf8'),
+    'registry=https://registry.npmjs.org/\n',
+  )
 })
 
 test('机器 setup 在必需批准缺失时不做任何安装或配置写入', async (t) => {

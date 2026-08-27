@@ -30,7 +30,7 @@ test('公开 setup CLI 在一个进程内完成插件安装和配置', async (t)
   )
   await writeFile(
     path.join(bin, 'npm'),
-    `#!/bin/sh\necho "npm $*" >> "$DSH_TEST_CALL_LOG"\nif [ "$1" = "view" ]; then echo '"0.1.0"'; fi\nexit 0\n`,
+    `#!/bin/sh\necho "npm $*" >> "$DSH_TEST_CALL_LOG"\nif [ "$1 $2 $3" = "config get registry" ]; then echo 'https://registry.npmjs.org/'; fi\nexit 0\n`,
   )
   await writeFile(path.join(bin, 'pnpm'), `#!/bin/sh\necho "pnpm $*" >> "$DSH_TEST_CALL_LOG"\necho 11.7.0\nexit 0\n`)
   await writeFile(path.join(bin, 'ps'), '#!/bin/sh\necho "4242 1 node /tmp/dsh/lib/bin.js web"\n')
@@ -62,6 +62,11 @@ test('公开 setup CLI 在一个进程内完成插件安装和配置', async (t)
   assert.match(result.stdout, /\/bind [A-Z0-9]+/)
   assert.doesNotMatch(result.stdout, /secret-cli/)
   assert.match(await readFile(log, 'utf8'), /dsh plugin --profile web add/)
+  assert.match(await readFile(log, 'utf8'), /npm config get registry/)
+  assert.equal(
+    await readFile(path.join(root, '.dsh', 'profiles', 'web', '.npmrc'), 'utf8'),
+    'registry=https://registry.npmjs.org/\n',
+  )
   assert.match(result.stdout, /检测到 dsh web 正在运行/)
   assert.doesNotMatch(await readFile(log, 'utf8'), /dsh web/)
   assert.deepEqual(parse(await readFile(path.join(root, '.dsh', '.credentials.yaml'), 'utf8')), {
