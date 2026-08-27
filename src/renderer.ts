@@ -15,6 +15,9 @@ import { AICard, CardCapabilityError, type CardTarget } from './aicard.js'
 import { cardTarget } from './targets.js'
 import { describeTurnError } from './errors.js'
 
+const EMPTY_MODEL_RESPONSE =
+  '⚠️ **模型本次未产出正文**\n> 可能是输出额度被推理占满，请调大 `max_tokens` 或更换模型后重试。'
+
 interface Segment {
   kind: 'text' | 'tool'
   text: string
@@ -253,8 +256,12 @@ export class Renderer {
     st.settle()
 
     const kind = reason?.kind
-    const errText = kind === 'error' ? describeTurnError(reason.error?.message) : ''
-    if (errText) this.deps.log(`turn ended in error: ${reason?.error?.message ?? 'unknown'}`)
+    const failure = reason?.failure ?? reason?.error
+    const failureMessage = typeof failure === 'string' ? failure : failure?.message
+    const failureCode =
+      typeof failure === 'object' && failure !== null && failure.code !== undefined ? String(failure.code) : undefined
+    const errText = kind === 'error' ? describeTurnError(failureMessage, failureCode) : ''
+    if (errText) this.deps.log(`turn ended in error: ${failureMessage ?? failureCode ?? 'unknown'}`)
     // 'aborted' is the host's cancellation variant (TurnEndReasonMap) — the
     // user already got its confirmation elsewhere, settle without publishing.
     const interrupted = kind === 'aborted'
@@ -284,7 +291,7 @@ export class Renderer {
     let text = st.carryOffset > 0 ? liveText.slice(st.carryOffset) : substance || liveText
     if (st.carryOffset > 0 && !text.trim()) text = substance ? '（完整内容见上方卡片）' : ''
     if (errText) text = text ? `${text}\n\n${errText}` : errText
-    if (!text) return
+    if (!text.trim()) text = EMPTY_MODEL_RESPONSE
 
     let card = !st.cardUnavailable && st.cardPromise ? await st.cardPromise : null
     if (card && st.needsRollover && (substance || errText)) {
