@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, stat } from 'node:fs/promises'
+import { readFileSync } from 'node:fs'
+import { mkdir, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -61,10 +62,31 @@ class FakeRunner {
     this.calls.push([command, ...args])
     if (command === 'dsh' && args[0] === '--version') return { code: 0, stdout: '0.1.0\n', stderr: '' }
     if (command === 'pnpm' && args[0] === '--version') return { code: 0, stdout: '11.7.0\n', stderr: '' }
+    if (command === 'npm' && args.join(' ') === 'config get registry') {
+      return { code: 0, stdout: 'https://registry.npmjs.org/\n', stderr: '' }
+    }
     if (command === 'npm' && args[0] === 'view') return { code: 0, stdout: '"0.1.0"\n', stderr: '' }
     if (command === 'dsh' && args[0] === 'plugin') return { code: 0, stdout: '', stderr: '' }
     if (command === 'dws') return { code: 1, stdout: '', stderr: 'not installed' }
     return { code: 1, stdout: '', stderr: 'unexpected command' }
+  }
+}
+
+class RegistryOverrideRunner extends FakeRunner {
+  constructor(dshHome) {
+    super()
+    this.dshHome = dshHome
+  }
+
+  run(command, args) {
+    if (command === 'npm' && args.join(' ') === 'config get registry') {
+      this.calls.push([command, ...args])
+      return { code: 0, stdout: 'https://build-user:private-secret@registry.npmmirror.com/\n', stderr: '' }
+    }
+    if (command === 'dsh' && args[0] === 'plugin') {
+      this.profileNpmrcAtInstall = readFileSync(path.join(this.dshHome, 'profiles', 'web', '.npmrc'), 'utf8')
+    }
+    return super.run(command, args)
   }
 }
 
@@ -203,6 +225,58 @@ test('setup 按实际 DSH 版本选择凭据文档格式', () => {
   assert.throws(() => credentialLayoutForDshVersion('not-a-version'), /无法识别 DSH 版本/)
 })
 
+test('setup 在插件安装前把当前 npm registry 同步到 web profile', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-dingtalk-registry-'))
+  t.after(() => import('node:fs/promises').then((fs) => fs.rm(root, { recursive: true, force: true })))
+  const dshHome = path.join(root, '.dsh')
+  const profileDir = path.join(dshHome, 'profiles', 'web')
+  await mkdir(profileDir, { recursive: true })
+  await writeFile(
+    path.join(profileDir, '.npmrc'),
+    [
+      '# 保留企业源的 scoped 配置',
+      '@example:registry=https://packages.example.test/',
+      'registry=https://stale.example.test/',
+      'always-auth=true',
+      '',
+    ].join('\n'),
+  )
+  const runner = new RegistryOverrideRunner(dshHome)
+
+  const result = await runGuidedSetup({
+    ui: new FakeUi({
+      credentialMethod: 'manual',
+      clientId: 'ding-app',
+      clientSecret: 'test-only-secret',
+      startWeb: false,
+    }),
+    runner,
+    dshHome,
+    stateDir: path.join(root, '.dsh-dingtalk'),
+    installSpec: '@dingtalk-real-ai/dsh-dingtalk@0.6.0',
+  })
+
+  assert.equal(result.code, 0)
+  assert.equal(
+    runner.calls.findIndex((call) => call.join(' ') === 'npm config get registry') <
+      runner.calls.findIndex((call) => call[0] === 'dsh' && call[1] === 'plugin'),
+    true,
+  )
+  assert.equal(
+    runner.profileNpmrcAtInstall,
+    [
+      '# 保留企业源的 scoped 配置',
+      '@example:registry=https://packages.example.test/',
+      'always-auth=true',
+      'registry=https://registry.npmmirror.com/',
+      '',
+    ].join('\n'),
+  )
+  if (process.platform !== 'win32') {
+    assert.equal((await stat(path.join(profileDir, '.npmrc'))).mode & 0o777, 0o600)
+  }
+})
+
 test('插件安装失败时 loading 以失败态和完成态文案收尾', async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-dingtalk-plugin-loading-failure-'))
   t.after(() => import('node:fs/promises').then((fs) => fs.rm(root, { recursive: true, force: true })))
@@ -247,6 +321,8 @@ test('插件安装失败时提取 pnpm 根因并保留完整日志', async (t) =
   assert.match(displayed, /依赖：@deepseek-ai\/dsh-base@0\.1\.1-rc\.2/)
   assert.doesNotMatch(displayed, /private-secret/)
   assert.match(displayed, /建议：当前 registry 可能缺少该版本/)
+  assert.match(displayed, /npm_config_registry=<可用 registry> npx @dingtalk-real-ai\/dsh-dingtalk@latest setup/)
+  assert.match(displayed, /~\/\.dsh\/profiles\/web\/\.npmrc/)
   assert.doesNotMatch(displayed, /Progress: resolved/)
 
   const logPath = displayed.match(/完整日志：(.+)/)?.[1]
@@ -261,12 +337,17 @@ test('插件安装失败时提取 pnpm 根因并保留完整日志', async (t) =
 
 test('安装失败按权限、网络和磁盘错误给出可执行建议', async (t) => {
   const cases = [
+    [
+      'npm error notarget No matching version found for @deepseek-ai/dsh-cmdline@^0.1.1-rc.2.',
+      /当前 registry 可能缺少该版本/,
+      'ETARGET',
+    ],
     ['npm error code EACCES\nnpm error permission denied', /检查 npm 全局目录和目标目录权限/],
     ['npm error code ENOTFOUND\nnpm error network registry unavailable', /检查网络、代理、DNS 和 registry 可达性/],
     ['npm error code ENOSPC\nnpm error no space left on device', /清理磁盘空间后重试/],
   ]
 
-  for (const [stderr, suggestion] of cases) {
+  for (const [stderr, suggestion, errorCode] of cases) {
     const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-dingtalk-categorized-diagnostic-'))
     t.after(() => import('node:fs/promises').then((fs) => fs.rm(root, { recursive: true, force: true })))
     const ui = new FakeUi()
@@ -279,7 +360,9 @@ test('安装失败按权限、网络和磁盘错误给出可执行建议', async
     })
 
     assert.equal(result.code, 1)
-    assert.match(ui.messages.join('\n'), suggestion)
+    const displayed = ui.messages.join('\n')
+    assert.match(displayed, suggestion)
+    if (errorCode) assert.match(displayed, new RegExp(`错误码：${errorCode}`))
   }
 })
 

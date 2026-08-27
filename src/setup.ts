@@ -4,6 +4,7 @@ import { accountStateDir, assertAccountId, DEFAULT_ACCOUNT_ID } from './accounts
 import { collectDiagnostics } from './diagnostics.js'
 import { diagnoseCommandFailure, formatInstallFailure } from './install-diagnostics.js'
 import { isSupportedNodeVersion } from './node-version.js'
+import { syncWebProfileNpmRegistry } from './npm-registry.js'
 import { beginRegistration, renderQr, waitForCredentials } from './onboard.js'
 import { issueBindingChallenge, OwnerBinding } from './owner.js'
 import {
@@ -622,6 +623,13 @@ export async function runGuidedSetup(options: RunGuidedSetupOptions): Promise<Gu
   }
   if (!(await ensureDshInstalled(ui, runner, stateDir))) return { code: 2, startWeb: false }
   if (!(await ensurePnpm(ui, runner, stateDir))) return { code: 2, startWeb: false }
+
+  try {
+    await syncWebProfileNpmRegistry(dshHome, runner)
+  } catch (error) {
+    ui.warn(error instanceof Error ? error.message : '无法同步 npm registry 到 DSH web profile')
+    return { code: 1, startWeb: false }
+  }
 
   const installed = await runWithLoading(
     ui,
