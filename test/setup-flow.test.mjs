@@ -337,12 +337,17 @@ test('插件安装失败时提取 pnpm 根因并保留完整日志', async (t) =
 
 test('安装失败按权限、网络和磁盘错误给出可执行建议', async (t) => {
   const cases = [
+    [
+      'npm error notarget No matching version found for @deepseek-ai/dsh-cmdline@^0.1.1-rc.2.',
+      /当前 registry 可能缺少该版本/,
+      'ETARGET',
+    ],
     ['npm error code EACCES\nnpm error permission denied', /检查 npm 全局目录和目标目录权限/],
     ['npm error code ENOTFOUND\nnpm error network registry unavailable', /检查网络、代理、DNS 和 registry 可达性/],
     ['npm error code ENOSPC\nnpm error no space left on device', /清理磁盘空间后重试/],
   ]
 
-  for (const [stderr, suggestion] of cases) {
+  for (const [stderr, suggestion, errorCode] of cases) {
     const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-dingtalk-categorized-diagnostic-'))
     t.after(() => import('node:fs/promises').then((fs) => fs.rm(root, { recursive: true, force: true })))
     const ui = new FakeUi()
@@ -355,7 +360,9 @@ test('安装失败按权限、网络和磁盘错误给出可执行建议', async
     })
 
     assert.equal(result.code, 1)
-    assert.match(ui.messages.join('\n'), suggestion)
+    const displayed = ui.messages.join('\n')
+    assert.match(displayed, suggestion)
+    if (errorCode) assert.match(displayed, new RegExp(`错误码：${errorCode}`))
   }
 })
 

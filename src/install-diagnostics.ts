@@ -54,6 +54,7 @@ function extractErrorCode(output: string): string | undefined {
   if (bracketed) return bracketed
   const npmCode = output.match(/npm\s+(?:error|ERR!)\s+code\s+([A-Z][A-Z0-9_]*)/iu)?.[1]
   if (npmCode) return npmCode.toUpperCase()
+  if (/npm\s+(?:error|ERR!)\s+notarget\b/iu.test(output)) return 'ETARGET'
   return KNOWN_ERROR_CODES.find((code) => new RegExp(`(?:^|\\s)${code}(?:\\s|:|$)`, 'mu').test(output))
 }
 
