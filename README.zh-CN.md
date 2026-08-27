@@ -120,6 +120,25 @@ npx @dingtalk-real-ai/dsh-dingtalk@latest setup
 
 `npx` 只运行本次 CLI，不会把 `dsh-dingtalk` 写入 PATH。首次安装的新机器人默认允许所有发送者和所有群；个人使用建议改为“仅管理员”和“禁止群聊”，再按需放开。
 
+### 企业私有 npm 源
+
+DSH 处于预发布阶段时，主包及其子包的预发布版本必须在 registry 中完整同步。Nexus、Verdaccio、自建 cnpm 等企业私有源若只同步了主包或部分子包，安装可能报 `ETARGET`、`notarget` 或 `ERR_PNPM_NO_MATCHING_VERSION`；这表示当前 registry 缺少所需版本，不是连接器配置错误。
+
+setup 会在安装插件前读取 `npm config get registry`，并把不含 URL 内嵌凭据的 registry 写入 `$DSH_HOME/profiles/web/.npmrc`（默认 `~/.dsh/profiles/web/.npmrc`），让外层 npm 与 DSH 拉起的 pnpm 使用同一个源。已有 scoped registry、认证和其他 `.npmrc` 配置会保留。若企业源缺包，可用一个已同步完整的源重试；该覆盖会同时传到后续 pnpm：
+
+```bash
+npm_config_registry=https://registry.npmjs.org npx @dingtalk-real-ai/dsh-dingtalk@latest setup
+```
+
+也可以手动设置并验证 web profile 的目录级配置；自定义 `DSH_HOME` 时请替换目录：
+
+```bash
+mkdir -p ~/.dsh/profiles/web
+cd ~/.dsh/profiles/web
+npm config set registry https://registry.npmjs.org --location=project
+pnpm config get registry
+```
+
 ## 怎么使用：手动操作或让机器人协助执行
 
 两种方式可以混用，始终由你发起任务：

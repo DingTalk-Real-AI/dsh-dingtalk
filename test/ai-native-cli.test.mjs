@@ -64,8 +64,9 @@ async function fixture(t) {
     windows: '@echo off\r\necho pnpm %*>>"%DSH_TEST_CALL_LOG%"\r\necho 11.7.0\r\nexit /b 0\r\n',
   })
   await writeFixtureCommand(bin, 'npm', {
-    posix: `#!/bin/sh\necho "npm $*" >> "$DSH_TEST_CALL_LOG"\nexit 0\n`,
-    windows: '@echo off\r\necho npm %*>>"%DSH_TEST_CALL_LOG%"\r\nexit /b 0\r\n',
+    posix: `#!/bin/sh\necho "npm $*" >> "$DSH_TEST_CALL_LOG"\nif [ "$1 $2 $3" = "config get registry" ]; then echo 'https://registry.npmjs.org/'; fi\nexit 0\n`,
+    windows:
+      '@echo off\r\necho npm %*>>"%DSH_TEST_CALL_LOG%"\r\nif "%~1 %~2 %~3"=="config get registry" echo https://registry.npmjs.org/\r\nexit /b 0\r\n',
   })
   await writeFixtureCommand(bin, 'ps', {
     posix: '#!/bin/sh\nexit 0\n',
