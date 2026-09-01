@@ -8,12 +8,15 @@ import { randomUUID } from 'node:crypto'
 import type { HostAgent, HostAgentContext, HostAgentRegistry, ImageBlock, TextBlock } from './host.js'
 import { sessionId } from './host.js'
 import type { InboundMessage } from './stream.js'
-import type { Renderer } from './renderer.js'
 import type { JsonStore } from './jsonstore.js'
 import type { ModelOverride } from './commands.js'
 
 /** conversationId → sessionId, persisted so a restarted host resumes the same session. */
 export type Bindings = JsonStore<string>
+
+export interface TurnRenderer {
+  onInbound(sessionId: string, msg: InboundMessage): Promise<void>
+}
 
 export interface BridgeOptions {
   cwd: string
@@ -27,7 +30,7 @@ export interface BridgeOptions {
   /** Default agent-preset composition (tools); empty when the deployment has no roster. */
   compose(): Promise<{ agentPreset?: string; setup?: (agentCtx: HostAgentContext) => Promise<void> }>
   /** Refresh transport context for tools that wait on channel input. */
-  onAgentMessage(agent: HostAgent, msg: InboundMessage): void
+  onAgentMessage(agent: HostAgent, msg: InboundMessage): void | Promise<void>
   /** Resolve one inbound picture into a stored attachment block; null = degrade to text note. */
   resolveImage?(downloadCode: string, scopeKey: string): Promise<ImageBlock | null>
 }
@@ -35,15 +38,15 @@ export interface BridgeOptions {
 export class Bridge {
   constructor(
     private readonly agents: HostAgentRegistry,
-    private readonly renderer: Renderer,
+    private readonly renderer: TurnRenderer,
     private readonly bindings: Bindings,
     private readonly opts: BridgeOptions,
   ) {}
 
   /** Drive one message through its agent; resolves when the turn settles. */
-  async process(msg: InboundMessage, scopeKey: string): Promise<void> {
+  async process(msg: InboundMessage, scopeKey: string): Promise<string> {
     const agent = await this.agentFor(scopeKey)
-    this.opts.onAgentMessage(agent, msg)
+    await this.opts.onAgentMessage(agent, msg)
     const settled = this.renderer.onInbound(agent.id, msg)
     const content: Array<TextBlock | ImageBlock> = []
     const parts = msg.contentParts?.length
@@ -69,6 +72,7 @@ export class Bridge {
       source: { kind: 'user' },
     })
     await settled
+    return agent.id
   }
 
   private async agentFor(conversationId: string): Promise<HostAgent> {

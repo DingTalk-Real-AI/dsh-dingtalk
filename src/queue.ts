@@ -35,7 +35,7 @@ export class Queue {
    * Enqueue a task for the conversation. `onBusy(position)` fires immediately
    * when earlier work is still pending.
    */
-  run(key: string, task: () => Promise<void>, onBusy?: (position: number) => void): void {
+  run(key: string, task: () => Promise<void>, onBusy?: (position: number) => void): Promise<void> {
     const now = Date.now()
     for (const [k, e] of this.entries) {
       if (e.depth === 0 && now - e.settledAt > CLEANUP_AFTER_MS) this.entries.delete(k)
@@ -78,5 +78,6 @@ export class Queue {
       }
     }
     entry.tail = entry.tail.then(guarded)
+    return entry.tail
   }
 }

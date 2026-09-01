@@ -9,8 +9,8 @@
 import type { Config, ReplyMode } from './config.js'
 import type { HostSession, HostSessionEvent } from './host.js'
 import type { InboundMessage } from './stream.js'
-import type { Outbound } from './outbound.js'
 import type { Emotion } from './emotion.js'
+import type { ReplySink } from './reply-sink.js'
 import { AICard, CardCapabilityError, type CardTarget } from './aicard.js'
 import { cardTarget } from './targets.js'
 import { describeTurnError } from './errors.js'
@@ -76,7 +76,7 @@ function renderLive(segments: Segment[]): string {
 
 export interface RendererDeps {
   config: Pick<Config, 'replyMode' | 'streaming' | 'asyncMode' | 'ackText' | 'markdownTitle' | 'emotionFirstResponse'>
-  outbound: Outbound
+  outbound: ReplySink
   emotion: Emotion
   createCard(target: CardTarget): Promise<AICard | null>
   log(line: string): void
@@ -118,7 +118,7 @@ export class Renderer {
 
     if (config.asyncMode) {
       // Ack now; the settled result is pushed at turn end, no streaming card.
-      void this.deps.outbound.sendText(msg.sessionWebhook, config.ackText)
+      void this.deps.outbound.sendText(msg, config.ackText)
     } else if (mode === 'aicard') {
       state.cardPromise = this.deps.createCard(cardTarget(msg))
     }
@@ -311,7 +311,7 @@ export class Renderer {
       }
     }
     // markdown / text / asyncMode / card-fallback all land here.
-    if (st.mode === 'text' && !errText) await outbound.sendText(st.msg.sessionWebhook, text)
-    else await outbound.sendMarkdown(st.msg.sessionWebhook, config.markdownTitle, text)
+    if (st.mode === 'text' && !errText) await outbound.sendText(st.msg, text)
+    else await outbound.sendMarkdown(st.msg, config.markdownTitle, text)
   }
 }

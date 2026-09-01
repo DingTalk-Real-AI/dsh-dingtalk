@@ -194,6 +194,154 @@ test('联网诊断异常和远端能力原因不会进入机器报告', async (t
   )
 })
 
+test('数字员工诊断按员工输出 Profile、能力、ready、订阅、事件、回复和远程审计且不含正文', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-dingtalk-de-doctor-'))
+  t.after(() => import('node:fs/promises').then((fs) => fs.rm(root, { recursive: true, force: true })))
+  const dshHome = await createProfile(
+    root,
+    [
+      '- id: dingtalk-channel',
+      '  config:',
+      '    digitalEmployees:',
+      '      - agentUuid: employee-doctor-1',
+      '        enabled: true',
+      '        dwsProfile: corp-doctor:user-doctor',
+      '        operatorOpenDingTalkId: operator-private-id',
+      '        allowedDirectSenders: [direct-private-id]',
+      '        allowedGroups: [group-private-id]',
+      '        sessionScope: chat',
+      '        protocolVersion: 1',
+      '',
+    ].join('\n'),
+  )
+  const stateDir = path.join(root, '.dsh-dingtalk')
+  const runtimeDir = path.join(stateDir, 'digital-employees', 'employee-doctor-1')
+  await mkdir(runtimeDir, { recursive: true, mode: 0o700 })
+  await writeFile(
+    path.join(runtimeDir, 'runtime.json'),
+    JSON.stringify({
+      state: 'ready',
+      observedAt: Date.now(),
+      capabilitiesVerifiedAt: 1,
+      subscriptionTopics: ['user_im_message_receive_o2o_all', 'user_im_message_receive_group_all'],
+      lastEventAt: 2,
+      lastReplyAt: 3,
+      lastAuditAt: 4,
+      forbiddenBody: 'chat-private-body',
+    }),
+    { mode: 0o600 },
+  )
+
+  const report = await collectDoctorReport({ mode: 'offline', dshHome, stateDir })
+
+  assert.deepEqual(report.accounts, [])
+  assert.equal(report.digitalEmployees.length, 1)
+  assert.equal(report.digitalEmployees[0].agentUuid, 'employee-doctor-1')
+  assert.equal(report.digitalEmployees[0].dwsProfile, 'corp-doctor:user-doctor')
+  assert.equal(report.digitalEmployees[0].result, 'pass')
+  assert.deepEqual(
+    report.digitalEmployees[0].checks.map((check) => check.code),
+    [
+      'digital-employee.configured',
+      'digital-employee.whitelist-configured',
+      'digital-employee.capabilities-verified',
+      'digital-employee.ready',
+      'digital-employee.subscription-ready',
+      'digital-employee.event-observed',
+      'digital-employee.reply-observed',
+      'digital-employee.audit-observed',
+    ],
+  )
+  assert.doesNotMatch(
+    JSON.stringify(report),
+    /operator-private-id|direct-private-id|group-private-id|chat-private-body/,
+  )
+})
+
+test('数字员工陈旧状态不能继续报告 ready、能力、订阅或最近链路通过', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-dingtalk-de-doctor-stale-'))
+  t.after(() => import('node:fs/promises').then((fs) => fs.rm(root, { recursive: true, force: true })))
+  const dshHome = await createProfile(
+    root,
+    [
+      '- id: dingtalk-channel',
+      '  config:',
+      '    digitalEmployees:',
+      '      - agentUuid: employee-stale-1',
+      '        dwsProfile: corp-stale:user-stale',
+      '        operatorOpenDingTalkId: operator-stale',
+      '        protocolVersion: 1',
+      '',
+    ].join('\n'),
+  )
+  const stateDir = path.join(root, '.dsh-dingtalk')
+  const runtimeDir = path.join(stateDir, 'digital-employees', 'employee-stale-1')
+  await mkdir(runtimeDir, { recursive: true })
+  await writeFile(
+    path.join(runtimeDir, 'runtime.json'),
+    JSON.stringify({
+      state: 'ready',
+      observedAt: Date.now() - 31_000,
+      capabilitiesVerifiedAt: Date.now() - 31_000,
+      subscriptionTopics: ['user_im_message_receive_o2o_all', 'user_im_message_receive_group_all'],
+      lastEventAt: Date.now() - 31_000,
+      lastReplyAt: Date.now() - 31_000,
+      lastAuditAt: Date.now() - 31_000,
+    }),
+  )
+
+  const report = await collectDoctorReport({ mode: 'offline', dshHome, stateDir })
+  assert.deepEqual(
+    report.digitalEmployees[0].checks.slice(2).map((check) => check.code),
+    [
+      'digital-employee.capabilities-unverified',
+      'digital-employee.stale',
+      'digital-employee.subscription-unverified',
+      'digital-employee.event-unobserved',
+      'digital-employee.reply-unobserved',
+      'digital-employee.audit-unobserved',
+    ],
+  )
+})
+
+test('数字员工与旧版根级机器人并存时仍诊断默认机器人', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-dingtalk-de-doctor-legacy-bot-'))
+  t.after(() => import('node:fs/promises').then((fs) => fs.rm(root, { recursive: true, force: true })))
+  const dshHome = await createProfile(
+    root,
+    [
+      '- id: dingtalk-channel',
+      '  config:',
+      '    ownerStaffId: legacy-owner',
+      '    digitalEmployees:',
+      '      - agentUuid: employee-with-bot',
+      '        dwsProfile: corp-with-bot:user-with-bot',
+      '        operatorOpenDingTalkId: operator-with-bot',
+      '        protocolVersion: 1',
+      '',
+    ].join('\n'),
+  )
+  await writeFile(
+    path.join(dshHome, '.credentials.yaml'),
+    'version: 1\nrefs:\n  DINGTALK_CLIENT_ID: legacy-client\n  DINGTALK_CLIENT_SECRET: legacy-secret\n',
+    { mode: 0o600 },
+  )
+
+  const report = await collectDoctorReport({
+    mode: 'offline',
+    dshHome,
+    stateDir: path.join(root, '.dsh-dingtalk'),
+  })
+  assert.deepEqual(
+    report.accounts.map((account) => account.id),
+    ['default'],
+  )
+  assert.deepEqual(
+    report.digitalEmployees.map((item) => item.agentUuid),
+    ['employee-with-bot'],
+  )
+})
+
 test('多账号报告逐账号汇总，单个告警决定整体 warning', async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-dingtalk-doctor-multi-'))
   t.after(() => import('node:fs/promises').then((fs) => fs.rm(root, { recursive: true, force: true })))

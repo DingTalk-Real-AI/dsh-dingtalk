@@ -1,5 +1,6 @@
 /** Tiny persisted string-keyed map shared by bindings / model overrides. */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 
 export class JsonStore<T> {
@@ -33,7 +34,11 @@ export class JsonStore<T> {
   }
 
   private save(): void {
-    mkdirSync(dirname(this.file), { recursive: true })
-    writeFileSync(this.file, JSON.stringify(Object.fromEntries(this.map), null, 2))
+    mkdirSync(dirname(this.file), { recursive: true, mode: 0o700 })
+    const temporary = `${this.file}.tmp.${process.pid}.${randomUUID()}`
+    writeFileSync(temporary, JSON.stringify(Object.fromEntries(this.map), null, 2), { mode: 0o600 })
+    chmodSync(temporary, 0o600)
+    renameSync(temporary, this.file)
+    chmodSync(this.file, 0o600)
   }
 }

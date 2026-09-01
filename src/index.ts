@@ -17,7 +17,6 @@ import {
   type RuntimeAccount,
 } from './accounts.js'
 import { Config } from './config.js'
-import { startStream } from './stream.js'
 import { Outbound } from './outbound.js'
 import { Emotion } from './emotion.js'
 import { AICard, CardCapability, type CardTarget } from './aicard.js'
@@ -36,6 +35,12 @@ import { modelAcceptsImages } from './image-mode.js'
 import { exactPackageSpec } from './package-info.js'
 import { resolveStateDir } from './paths.js'
 import { cardTarget } from './targets.js'
+import { DwsDigitalEmployeeSource, type DigitalEmployeeInbound } from './digital-employee-runtime.js'
+import { DigitalEmployeeApprovalManager, DigitalEmployeeTextRenderer } from './digital-employee-renderer.js'
+import { routeDigitalEmployeePreTask } from './digital-employee-routing.js'
+import { BotReplySink } from './reply-sink.js'
+import { RobotStreamSource } from './inbound-source.js'
+import { validateDigitalEmployeeConfigs, type DigitalEmployeeConfig } from './setup-state.js'
 import type {
   HostAgentContext,
   HostAgentPresets,
@@ -69,7 +74,10 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   for (const id of resolution.missingCredentialAccountIds) log(`robot ${id}: missing credentials — skipped`)
   for (const id of resolution.duplicateAccountIds)
     log(`robot ${id}: clientId already used by an earlier robot — skipped`)
-  if (!resolution.accounts.length) {
+  const digitalEmployees = validateDigitalEmployeeConfigs(config.digitalEmployees ?? []).filter(
+    (employee) => employee.enabled,
+  )
+  if (!resolution.accounts.length && !digitalEmployees.length) {
     log('no configured DingTalk robots could start')
     return
   }
@@ -77,24 +85,217 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   const cwd = config.workspace || path.join(os.homedir(), 'dsh-dingtalk-workspace')
   fs.mkdirSync(cwd, { recursive: true })
   const primary = resolution.accounts[0]
-  const dwsTools = new DwsTools({
-    workspace: cwd,
-    clientId: primary.clientId,
-    clientSecret: primary.clientSecret,
-    exposeCredentials: resolution.accounts.length === 1,
-    log,
-  })
-  if (config.tools.enabled) void dwsTools.enable()
+  const dwsTools = primary
+    ? new DwsTools({
+        workspace: cwd,
+        clientId: primary.clientId,
+        clientSecret: primary.clientSecret,
+        exposeCredentials: resolution.accounts.length === 1,
+        log,
+      })
+    : undefined
+  if (config.tools.enabled && dwsTools) void dwsTools.enable()
 
-  await Promise.all(
-    resolution.accounts.map(async (account) => {
+  await Promise.all([
+    ...resolution.accounts.map(async (account) => {
       try {
         await startAccount(ctx, config, account, cwd, dwsTools)
       } catch (error) {
         log(`robot ${account.id}: failed to start (${error instanceof Error ? error.message : error})`)
       }
     }),
+    ...digitalEmployees.map(async (employee) => {
+      try {
+        await startDigitalEmployee(ctx, config, employee, cwd)
+      } catch (error) {
+        log(
+          `digital employee ${employee.agentUuid}: failed to start (${error instanceof Error ? error.message : error})`,
+        )
+      }
+    }),
+  ])
+}
+
+async function startDigitalEmployee(
+  ctx: Context,
+  config: Config,
+  employee: DigitalEmployeeConfig,
+  cwd: string,
+): Promise<void> {
+  const log = (line: string) =>
+    console.log(`[dsh-dingtalk:de:${employee.agentUuid} ${new Date().toTimeString().slice(0, 8)}] ${line}`)
+  const stateDir = path.join(resolveStateDir(), 'digital-employees', employee.agentUuid)
+  const agents = (ctx as any).agents as HostAgentRegistry
+  const defaultModel = (ctx as any).agentDefaultModel as HostDefaultModel
+  const currentDefault = () => {
+    try {
+      return defaultModel.currentSelection()
+    } catch (error) {
+      log(`default model unavailable (${error instanceof Error ? error.message : error})`)
+      return undefined
+    }
+  }
+  const workspace = new WorkspaceLinker({
+    cwd,
+    resolveRegistry: () => (ctx as any).get?.('workspaceRegistry'),
+    resolvePersistence: () => (ctx as any).get?.('sessionPersistence'),
+    log,
+  })
+  void workspace.start()
+  const bindings = new JsonStore<string>(path.join(stateDir, 'bindings.json'), log)
+  const modelOverrides = new JsonStore<ModelOverride>(path.join(stateDir, 'models.json'), log)
+  const workspaceOverrides = new JsonStore<string>(path.join(stateDir, 'workspaces.json'), log)
+  const queue = new Queue(log)
+  const eventsByMessageId = new Map<string, DigitalEmployeeInbound['event']>()
+  const commandReplyEvents = new Map<string, DigitalEmployeeInbound['event']>()
+  let commandSequence = 0
+  let bridge!: Bridge
+  let renderer!: DigitalEmployeeTextRenderer
+  let approvals!: DigitalEmployeeApprovalManager
+  let commands!: Commands
+
+  const runtime = new DwsDigitalEmployeeSource({
+    employee,
+    stateDir,
+    log,
+    onMessage: async (input) => {
+      commandReplyEvents.set(input.message.msgId, input.event)
+      try {
+        if (await routeDigitalEmployeePreTask(input, commands, approvals)) return
+      } finally {
+        commandReplyEvents.delete(input.message.msgId)
+      }
+      eventsByMessageId.set(input.message.msgId, input.event)
+      renderer.accept(input)
+      return queue.run(input.scopeKey, async () => {
+        try {
+          const sessionId = await bridge.process(input.message, input.scopeKey)
+          await replySink.audit({
+            eventId: input.event.eventId,
+            sessionId,
+            operationType: 'task_end',
+            status: 'completed',
+          })
+        } catch (error) {
+          eventsByMessageId.delete(input.message.msgId)
+          renderer.discard(input.message.msgId)
+          log(`task failed (${error instanceof Error ? error.message : 'unknown'})`)
+          try {
+            await replySink.audit({
+              eventId: input.event.eventId,
+              sessionId: bindings.get(input.scopeKey),
+              operationType: 'task_end',
+              status: 'failed',
+            })
+          } catch {
+            // 审计自身不可用时保持 fail-closed；不创建第二次模型任务或回复重试。
+          }
+        }
+      })
+    },
+  })
+  const replySink = runtime.replySink
+  renderer = new DigitalEmployeeTextRenderer(replySink, log)
+  approvals = new DigitalEmployeeApprovalManager(
+    replySink,
+    employee.operatorOpenDingTalkId,
+    config.approvalTimeoutMs,
+    log,
   )
+  commands = new Commands({
+    agents,
+    outbound: {
+      sendMarkdown: async (message, _title, text) => {
+        const event = commandReplyEvents.get(message.msgId)
+        if (!event) throw new Error('missing_digital_employee_command_reply_context')
+        commandSequence++
+        const result = await replySink.reply(
+          event,
+          `command:${event.eventId}`,
+          text,
+          `command_reply_${commandSequence}`,
+        )
+        return result.deliveryStatus === 'delivered'
+      },
+    },
+    bindings,
+    modelOverrides,
+    queue,
+    defaultModel: currentDefault,
+    toolsStatusLine: () => 'DWS Agent 工具与数字员工 Channel 独立',
+    workspaceOverrides,
+    defaultWorkspace: cwd,
+    listWorkspaces: async () => {
+      try {
+        const registry = (ctx as any).get?.('workspaceRegistry')
+        if (!registry?.list) return []
+        const items = await registry.list()
+        return (Array.isArray(items) ? items : []).map((item: any) => ({
+          path: item.path ?? String(item),
+          title: item.title,
+        }))
+      } catch {
+        return []
+      }
+    },
+    connectorStatus: () => {
+      const status = runtime.currentStatus()
+      return [
+        `Channel：数字员工文本模式（protocol 1）`,
+        `DWS Profile：${employee.dwsProfile}`,
+        `事件进程：${status.state}`,
+        `额外私聊白名单：${employee.allowedDirectSenders.length} 人`,
+        `群白名单：${employee.allowedGroups.length} 个`,
+        `远程审计：${status.lastAuditAt ? '最近成功' : '尚未观察到成功'}`,
+      ]
+    },
+    markdownTitle: config.markdownTitle,
+    log,
+  })
+  bridge = new Bridge(agents, renderer, bindings, {
+    cwd,
+    log,
+    modelOverrides,
+    workspaceOverrides,
+    modelSelection: currentDefault,
+    onAgentMessage: async (agent, msg) => {
+      const event = eventsByMessageId.get(msg.msgId)
+      eventsByMessageId.delete(msg.msgId)
+      if (event) {
+        approvals.bindSession(agent.id, event)
+        await replySink.audit({
+          eventId: event.eventId,
+          sessionId: agent.id,
+          operationType: 'task_start',
+          status: 'started',
+        })
+      }
+      void workspace.attach(agent.id)
+    },
+    compose: async () => {
+      const presets = (ctx as any).get?.('agentPresets') as HostAgentPresets | undefined
+      if (!presets) return { setup: async (agentCtx: HostAgentContext) => approvals.install(agentCtx) }
+      try {
+        const resolved = await presets.resolve(undefined)
+        return {
+          agentPreset: resolved.id,
+          setup: async (agentCtx: HostAgentContext) => {
+            await presets.mount(agentCtx, resolved.id)
+            approvals.install(agentCtx)
+          },
+        }
+      } catch (error) {
+        log(`preset compose failed (${error instanceof Error ? error.message : error})`)
+        return { setup: async (agentCtx: HostAgentContext) => approvals.install(agentCtx) }
+      }
+    },
+  })
+  ;(ctx as any).on('session/event', (session: HostSession, event: HostSessionEvent) => {
+    renderer.onSessionEvent(session, event)
+  })
+  ;(ctx as any).on('dispose', () => runtime.stop())
+  await runtime.start()
+  log(`channel up: profile=${employee.dwsProfile} protocol=1 text-only`)
 }
 
 async function startAccount(
@@ -102,7 +303,7 @@ async function startAccount(
   config: Config,
   account: RuntimeAccount,
   cwd: string,
-  dwsTools: DwsTools,
+  dwsTools: DwsTools | undefined,
 ): Promise<void> {
   const { clientId, clientSecret } = account
   const log = (line: string) =>
@@ -159,6 +360,7 @@ async function startAccount(
   }
 
   const outbound = new Outbound({ clientId, clientSecret }, log)
+  const replySink = new BotReplySink(outbound)
   // Shared by question/plan-review/approval cards and the queue busy card.
   const interactionCards = interactionCardTemplateId
     ? new InteractionCards(() => outbound.token(), clientId, interactionCardTemplateId, log)
@@ -182,7 +384,7 @@ async function startAccount(
   const emotion = new Emotion(() => outbound.token(), clientId, log)
   const renderer = new Renderer({
     config,
-    outbound,
+    outbound: replySink,
     emotion,
     createCard: (target: CardTarget) =>
       AICard.create({
@@ -199,7 +401,7 @@ async function startAccount(
   const workspaceOverrides = new JsonStore<string>(path.join(stateDir, 'workspaces.json'), log)
   const queue = new Queue(log)
   const questions = new QuestionManager({
-    outbound,
+    outbound: replySink,
     markdownTitle: config.markdownTitle,
     timeoutMs: config.questionTimeoutMs,
     approvalTimeoutMs: config.approvalTimeoutMs,
@@ -266,12 +468,12 @@ async function startAccount(
   })
   const commands = new Commands({
     agents,
-    outbound,
+    outbound: replySink,
     bindings,
     modelOverrides,
     queue,
     defaultModel: currentDefault,
-    toolsStatusLine: () => dwsTools.statusLine(),
+    toolsStatusLine: () => dwsTools?.statusLine() ?? 'DWS Agent 工具：未启用（不影响 Channel）',
     workspaceOverrides,
     defaultWorkspace: cwd,
     listWorkspaces: async () => {
@@ -347,7 +549,7 @@ async function startAccount(
       outbound.sendMarkdown(msg.sessionWebhook, config.markdownTitle, text),
     )
   }
-  const stop = await startStream({
+  const source = new RobotStreamSource({
     clientId,
     clientSecret,
     debug: config.debug,
@@ -522,7 +724,8 @@ async function startAccount(
       }
     },
   })
-  ;(ctx as any).on('dispose', () => stop())
+  await source.start()
+  ;(ctx as any).on('dispose', () => source.stop())
 
   log(
     `channel up: workspace=${cwd} replyMode=${config.replyMode.direct}/${config.replyMode.group} streaming=${config.streaming.enabled} async=${config.asyncMode}`,

@@ -24,8 +24,8 @@ function harness(timeoutMs = 1_000, delivered = true, interactionCards, approval
   let definition
   const manager = new QuestionManager({
     outbound: {
-      async sendMarkdown(sessionWebhook, title, text) {
-        sent.push({ sessionWebhook, title, text })
+      async sendMarkdown(message, title, text) {
+        sent.push({ sessionWebhook: message.sessionWebhook, title, text })
         return delivered
       },
     },
@@ -397,8 +397,8 @@ test('钉钉审批优先于先注册的 Web 全局审批处理器', async () => 
   const sent = []
   const manager = new QuestionManager({
     outbound: {
-      async sendMarkdown(sessionWebhook, title, text) {
-        sent.push({ sessionWebhook, title, text })
+      async sendMarkdown(message, title, text) {
+        sent.push({ sessionWebhook: message.sessionWebhook, title, text })
         return true
       },
     },
@@ -632,8 +632,8 @@ test('复用已加载的 Agent 时补装 scoped ask_user_question，且重复调
   let definition
   const manager = new QuestionManager({
     outbound: {
-      async sendMarkdown(sessionWebhook, title, text) {
-        sent.push({ sessionWebhook, title, text })
+      async sendMarkdown(message, title, text) {
+        sent.push({ sessionWebhook: message.sessionWebhook, title, text })
         return true
       },
     },
