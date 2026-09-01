@@ -246,7 +246,7 @@ async function startDigitalEmployee(
         `事件进程：${status.state}`,
         `额外私聊白名单：${employee.allowedDirectSenders.length} 人`,
         `群白名单：${employee.allowedGroups.length} 个`,
-        `远程审计：${status.lastAuditAt ? '最近成功' : '尚未观察到成功'}`,
+        `本地审计：${status.lastAuditAt ? '最近成功' : '尚未观察到成功'}`,
       ]
     },
     markdownTitle: config.markdownTitle,

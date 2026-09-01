@@ -2,7 +2,7 @@
 
 数字员工是与现有机器人平级的独立 Channel。机器人模式不依赖 DWS；只有启用了 `digitalEmployees[]` 的员工才要求本机安装兼容 DWS。首期仅支持文本事件和文本引用回复，多员工从第一版开始隔离运行。
 
-> 发布门禁：DSH 侧协议与 fake DWS 验证已经固化，但真实联合验收必须等待 DWS 发布本文所列的完整 stdin 回复、operator 私聊、审计与能力探测契约。缺少任一能力时，该员工 fail-closed，机器人和其他员工不受影响。
+> 发布门禁：DSH fake 已对齐 DWS 的真实 ready、snake_case 事件、统一 JSON envelope 与 Channel 命令路径。仍须固定 DWS/DSH/DEAP 精确 SHA 做真实组织联合验收；缺少任一能力或本地审计不可写时，该员工 fail-closed，机器人和其他员工不受影响。
 
 ## 接入与配置
 
@@ -35,7 +35,7 @@ DSH 启动每个员工前先执行只读能力探测，要求 DWS 同时声明�
 - Event Consume；
 - 文本引用回复 stdin；
 - operator 私聊 stdin；
-- 审计上报 stdin；
+- `auditMode=local_required`；
 - `protocolVersion: 1`。
 
 事件进程固定使用参数数组启动，不经过 shell：
@@ -47,25 +47,24 @@ dws --profile <corpId:userId> event consume
   --flatten --format ndjson
 ```
 
-DSH 同时排空 stdout/stderr，只有收到精确的 `[event] ready` 后才接受 NDJSON。事件 schema 为：
+DSH 同时排空 stdout/stderr，只有 ready 行匹配 `^\[event\] ready(?:\s|$)` 后才接受 NDJSON；允许 `event_count`、`bus_pid` 等后缀。`--flatten` 事件不要求额外 schemaVersion，直接消费真实 snake_case 字段：
 
 ```json
 {
-  "schemaVersion": 1,
-  "eventId": "stable-event-id",
-  "messageId": "open-message-id",
-  "conversationId": "open-conversation-id",
-  "conversationType": "direct",
-  "senderOpenDingTalkId": "stable-sender-id",
-  "senderName": "display-name",
-  "text": "message text",
-  "createdAt": "timestamp"
+  "type": "user_im_message_receive_o2o_all",
+  "event_id": "stable-event-id",
+  "message_id": "open-message-id",
+  "conversation_id": "open-conversation-id",
+  "sender_open_dingtalk_id": "stable-sender-id",
+  "sender": "display-name",
+  "content": "message text",
+  "event_time": "timestamp"
 }
 ```
 
-回复、operator 私聊和审计正文只从 stdin 传入；正文不会进入 argv、环境变量、配置、日志、运行状态或测试快照。回复结果必须回传 `openMessageId`、`conversationId`、`deliveryStatus` 和原幂等键。`deliveryStatus: unknown` 不自动重发，避免重复消息。
+回复和 operator 私聊固定调用 `dingtalk-tag channel reply/operator-private --stdin --format json`，并要求 DWS envelope `ok=true`，业务结果从 `data` 读取。正文不会进入 argv、环境变量、配置、日志、运行状态或测试快照。回复结果必须回传 `openMessageId`、`conversationId`、`deliveryStatus` 和原幂等键。`deliveryStatus: unknown` 不自动重发，避免重复消息。
 
-审计只包含员工、事件、Session、operator、操作类型、工具名、状态、时间、回复消息 ID 和 trace ID 等元数据。审计不可用时不开始新任务。
+审计由 DSH 按员工写入本地 JSONL，目录 `0700`、文件 `0600` 并加锁；只包含事件、Session、操作类型、工具名、状态、时间、回复消息 ID 和 trace ID 等元数据，不含消息正文。本地审计不可写时不开始新任务；未来远程转发只能是可选 best-effort 扩展。
 
 ## 本地运行与隔离
 
@@ -87,7 +86,7 @@ DSH 同时排空 stdout/stderr，只有收到精确的 `[event] ready` 后才接
 - `agentUuid`、精确 DWS Profile 和协议版本；
 - 白名单数量；
 - 能力探测、ready 和单聊/群聊订阅；
-- 最近事件、回复和远程审计是否被观察到；
+- 最近事件、回复和本地审计是否被观察到；
 - 脱敏失败码。
 
 诊断不输出 operator、白名单具体身份、凭据或聊天正文。

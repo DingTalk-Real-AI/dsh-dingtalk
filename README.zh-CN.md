@@ -12,7 +12,7 @@
 
 接入必须由 DWS `dingtalk-tag connect --channel dsh` 发起，并通过 stdin 幂等调用本包的 `digital-employee register`。注册后重新运行 `setup` 管理 operator、私聊 OpenDingTalkId 和群 openConversationId 白名单。`doctor` 会按员工显示能力、ready、订阅、最近事件/回复/审计和脱敏失败码。
 
-当前公开 DWS 尚须发布完整的安全回复、operator 私聊、审计和 capability 契约后才能做真实联合验收；缺少任一契约时该员工 fail-closed，不影响机器人或其他员工。详细接口、运行边界和发布门禁见 [数字员工 Channel 文档](docs/digital-employees.md)。业务 ack/replay/cursor 未完成前，本能力不承诺 exactly-once 或不丢消息。
+本分支已按 DWS 的 `dingtalk-tag channel capabilities/reply/operator-private`、统一 JSON envelope、真实 snake_case Event Consume 和本地必需审计协议对齐；仍须固定 DWS/DSH/DEAP 精确 SHA 做真实组织联合验收。缺少任一能力或本地审计不可写时该员工 fail-closed，不影响机器人或其他员工。详细接口和验收边界见 [数字员工 Channel 文档](docs/digital-employees.md)。业务 ack/replay/cursor 未完成前，本能力不承诺 exactly-once 或不丢消息。
 
 ## AI Native 安装（推荐）
 

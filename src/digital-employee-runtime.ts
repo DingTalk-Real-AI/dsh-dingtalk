@@ -1,6 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { chmodSync, mkdirSync } from 'node:fs'
 import path from 'node:path'
+import { LocalDigitalEmployeeAuditLog } from './digital-employee-audit.js'
 import { atomicPrivateJsonWrite, DigitalEmployeeLedger } from './digital-employee-ledger.js'
 import { DwsDigitalEmployeeReplySink, sanitizedDwsEnvironment } from './digital-employee-reply-sink.js'
 import type { DigitalEmployeeEvent, DigitalEmployeeInbound } from './digital-employee-types.js'
@@ -14,7 +15,7 @@ export type {
   DigitalEmployeeReplyResult,
 } from './digital-employee-types.js'
 
-const READY_LINE = '[event] ready'
+const READY_LINE = /^\[event\] ready(?:\s|$)/
 const MAX_LINE_BYTES = 1024 * 1024
 const STATUS_HEARTBEAT_MS = 10_000
 
@@ -49,21 +50,26 @@ function safeId(value: unknown, field: string): string {
 function parseEvent(value: unknown): DigitalEmployeeEvent {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid_event')
   const raw = value as Record<string, unknown>
-  if (raw.schemaVersion !== 1) throw new Error('unsupported_event_schema')
-  if (raw.conversationType !== 'direct' && raw.conversationType !== 'group') {
-    throw new Error('invalid_conversation_type')
-  }
-  if (typeof raw.text !== 'string' || raw.text.length > MAX_LINE_BYTES) throw new Error('invalid_text')
+  const eventType = raw.type ?? raw.event_type
+  const conversationType =
+    eventType === 'user_im_message_receive_o2o_all'
+      ? 'direct'
+      : eventType === 'user_im_message_receive_group_all'
+        ? 'group'
+        : undefined
+  if (!conversationType) throw new Error('invalid_event_type')
+  if (typeof raw.content !== 'string' || raw.content.length > MAX_LINE_BYTES) throw new Error('invalid_text')
+  const createdAt = raw.create_time ?? raw.event_time ?? raw.timestamp
   return {
     schemaVersion: 1,
-    eventId: safeId(raw.eventId, 'event_id'),
-    messageId: safeId(raw.messageId, 'message_id'),
-    conversationId: safeId(raw.conversationId, 'conversation_id'),
-    conversationType: raw.conversationType,
-    senderOpenDingTalkId: safeId(raw.senderOpenDingTalkId, 'sender'),
-    senderName: typeof raw.senderName === 'string' ? raw.senderName.slice(0, 128) : '',
-    text: raw.text,
-    createdAt: typeof raw.createdAt === 'string' ? raw.createdAt : String(Date.now()),
+    eventId: safeId(raw.event_id, 'event_id'),
+    messageId: safeId(raw.message_id, 'message_id'),
+    conversationId: safeId(raw.conversation_id, 'conversation_id'),
+    conversationType,
+    senderOpenDingTalkId: safeId(raw.sender_open_dingtalk_id, 'sender'),
+    senderName: typeof raw.sender === 'string' ? raw.sender.slice(0, 128) : '',
+    text: raw.content,
+    createdAt: typeof createdAt === 'string' || typeof createdAt === 'number' ? String(createdAt) : String(Date.now()),
   }
 }
 
@@ -110,6 +116,8 @@ export class DwsDigitalEmployeeSource implements InboundSource {
   readonly replySink: DwsDigitalEmployeeReplySink
 
   constructor(private readonly options: DigitalEmployeeRuntimeOptions) {
+    mkdirSync(options.stateDir, { recursive: true, mode: 0o700 })
+    chmodSync(options.stateDir, 0o700)
     try {
       this.ledger = new DigitalEmployeeLedger(path.join(options.stateDir, 'ledger.json'))
     } catch {
@@ -122,12 +130,11 @@ export class DwsDigitalEmployeeSource implements InboundSource {
       employee: options.employee,
       dwsCommand: options.dwsCommand,
       ledger: this.ledger,
+      auditSink: new LocalDigitalEmployeeAuditLog(options.stateDir, options.employee.agentUuid),
       onFailure: (code) => this.fail(code),
       onReply: () => this.updateStatus({ ...this.status, state: 'ready', lastReplyAt: Date.now() }),
       onAudit: () => this.updateStatus({ ...this.status, lastAuditAt: Date.now() }),
     })
-    mkdirSync(options.stateDir, { recursive: true, mode: 0o700 })
-    chmodSync(options.stateDir, 0o700)
   }
 
   async start(): Promise<void> {
@@ -193,7 +200,7 @@ export class DwsDigitalEmployeeSource implements InboundSource {
     let retryable: boolean | undefined
     let readyTimedOut = false
     const consumeLine = (line: string, stream: 'stdout' | 'stderr') => {
-      if (line === READY_LINE) {
+      if (READY_LINE.test(line)) {
         ready = true
         this.updateStatus({ state: 'ready' })
         this.startHeartbeat()
@@ -313,7 +320,7 @@ export class DwsDigitalEmployeeSource implements InboundSource {
       this.ledger.markEvent(event.eventId)
       return
     }
-    // 远程审计不可用时不开始新任务。成功后才占用 eventId，允许上游重放暂时失败的事件。
+    // 本地审计不可写时不开始新任务。成功后才占用 eventId，允许上游重放暂时失败的事件。
     await this.replySink.audit({ eventId: event.eventId, operationType: 'access_check', status: 'accepted' })
     await this.replySink.waitForPendingReplies(event.conversationId)
     if (this.ledger.hasEvent(event.eventId) || this.ledger.hasSentMessage(event.messageId)) return

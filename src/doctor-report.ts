@@ -212,7 +212,7 @@ async function collectDigitalEmployeeReport(
       'digital-employee-capabilities',
       'digital-employee.capabilities-verified',
       'digital-employee.capabilities-unverified',
-      'DWS event/reply/operator-private/audit stdin 契约已通过运行时探测',
+      'DWS event/reply/operator-private 契约与本地必需审计已通过运行时探测',
       '尚未观察到兼容 DWS 能力探测结果',
     ),
   )
@@ -284,8 +284,8 @@ async function collectDigitalEmployeeReport(
       'digital-employee-audit',
       'digital-employee.audit-observed',
       'digital-employee.audit-unobserved',
-      '已观察到最近远程审计成功',
-      '尚未观察到远程审计成功',
+      '已观察到最近本地审计成功',
+      '尚未观察到本地审计成功',
     ),
   )
   return {

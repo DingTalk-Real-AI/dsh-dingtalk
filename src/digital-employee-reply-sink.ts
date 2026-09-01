@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { spawn } from 'node:child_process'
+import type { DigitalEmployeeAuditFields } from './digital-employee-audit.js'
 import type { DigitalEmployeeLedger } from './digital-employee-ledger.js'
 import type { DigitalEmployeeConfig } from './setup-state.js'
 import type { DigitalEmployeeEvent, DigitalEmployeeReplyResult } from './digital-employee-types.js'
@@ -9,22 +10,12 @@ const MAX_JSON_OUTPUT_BYTES = 256 * 1024
 interface DwsCapabilities {
   schemaVersion: 1
   protocolVersion: 1
+  auditMode: 'local_required'
   capabilities: {
     eventConsume: true
     replyStdin: true
     operatorPrivateStdin: true
-    auditStdin: true
   }
-}
-
-export interface DigitalEmployeeAuditFields {
-  eventId?: string
-  sessionId?: string
-  operationType: string
-  toolName?: string
-  status: string
-  replyMessageId?: string
-  traceId?: string
 }
 
 export interface DigitalEmployeeReplySink {
@@ -47,6 +38,7 @@ interface DwsDigitalEmployeeReplySinkOptions {
   employee: DigitalEmployeeConfig
   dwsCommand?: string
   ledger: DigitalEmployeeLedger
+  auditSink: DigitalEmployeeAuditSink
   onFailure(code: string): void
   onReply(): void
   onAudit(): void
@@ -79,7 +71,18 @@ export class DwsDigitalEmployeeReplySink implements DigitalEmployeeControlSink {
     const key = idempotencyKey(this.options.employee, event, purpose)
     let result: unknown
     const delivery = this.execJson(
-      ['--profile', this.options.employee.dwsProfile, 'dingtalk-tag', 'reply', '--channel', 'dsh', '--stdin', '--json'],
+      [
+        '--profile',
+        this.options.employee.dwsProfile,
+        'dingtalk-tag',
+        'channel',
+        'reply',
+        '--channel',
+        'dsh',
+        '--stdin',
+        '--format',
+        'json',
+      ],
       {
         schemaVersion: 1,
         protocolVersion: 1,
@@ -135,11 +138,13 @@ export class DwsDigitalEmployeeReplySink implements DigitalEmployeeControlSink {
           '--profile',
           this.options.employee.dwsProfile,
           'dingtalk-tag',
+          'channel',
           'operator-private',
           '--channel',
           'dsh',
           '--stdin',
-          '--json',
+          '--format',
+          'json',
         ],
         {
           schemaVersion: 1,
@@ -170,26 +175,7 @@ export class DwsDigitalEmployeeReplySink implements DigitalEmployeeControlSink {
 
   async audit(fields: DigitalEmployeeAuditFields): Promise<void> {
     try {
-      await this.execJson(
-        [
-          '--profile',
-          this.options.employee.dwsProfile,
-          'dingtalk-tag',
-          'audit',
-          '--channel',
-          'dsh',
-          '--stdin',
-          '--json',
-        ],
-        {
-          schemaVersion: 1,
-          protocolVersion: 1,
-          agentUuid: this.options.employee.agentUuid,
-          operator: this.options.employee.operatorOpenDingTalkId,
-          time: new Date().toISOString(),
-          ...fields,
-        },
-      )
+      await this.options.auditSink.audit(fields)
     } catch (error) {
       this.options.onFailure('audit_unavailable')
       throw error
@@ -204,10 +190,12 @@ export class DwsDigitalEmployeeReplySink implements DigitalEmployeeControlSink {
         '--profile',
         this.options.employee.dwsProfile,
         'dingtalk-tag',
+        'channel',
         'capabilities',
         '--channel',
         'dsh',
-        '--json',
+        '--format',
+        'json',
       ])) as Partial<DwsCapabilities>
     } catch (error) {
       this.options.onFailure('dws_capability_probe_failed')
@@ -217,10 +205,10 @@ export class DwsDigitalEmployeeReplySink implements DigitalEmployeeControlSink {
     if (
       result.schemaVersion !== 1 ||
       result.protocolVersion !== 1 ||
+      result.auditMode !== 'local_required' ||
       capabilities?.eventConsume !== true ||
       capabilities.replyStdin !== true ||
-      capabilities.operatorPrivateStdin !== true ||
-      capabilities.auditStdin !== true
+      capabilities.operatorPrivateStdin !== true
     ) {
       this.options.onFailure('incompatible_dws_capabilities')
       throw new Error('incompatible_dws_capabilities')
@@ -271,7 +259,12 @@ export class DwsDigitalEmployeeReplySink implements DigitalEmployeeControlSink {
           return
         }
         try {
-          resolve(JSON.parse(stdout))
+          const envelope = JSON.parse(stdout) as Record<string, unknown>
+          if (envelope.ok !== true || envelope.outcome !== 'success' || !('data' in envelope)) {
+            reject(new Error('invalid_dws_envelope'))
+            return
+          }
+          resolve(envelope.data)
         } catch {
           reject(new Error('invalid_dws_json'))
         }

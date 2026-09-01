@@ -67,21 +67,21 @@ async function createFakeDws(root) {
 const fs = require('node:fs')
 const record = process.env.FAKE_DWS_RECORD
 const args = process.argv.slice(2)
-const operation = args.includes('capabilities') ? 'capabilities' : args.includes('audit') ? 'audit' : args.includes('reply') ? 'reply' : args.includes('operator-private') ? 'operator-private' : args.includes('consume') ? 'consume' : 'unknown'
+const operation = args.includes('capabilities') ? 'capabilities' : args.includes('reply') ? 'reply' : args.includes('operator-private') ? 'operator-private' : args.includes('consume') ? 'consume' : 'unknown'
 fs.appendFileSync(record, JSON.stringify({ operation, args, credentialEnvKeys: Object.keys(process.env).filter((key) => /TOKEN|AUTH_?CODE|CLIENT_?SECRET|PASSWORD|CREDENTIAL/i.test(key)) }) + '\\n')
 if (operation === 'capabilities') {
-  process.stdout.write(JSON.stringify({ schemaVersion: 1, protocolVersion: 1, capabilities: { eventConsume: true, replyStdin: true, operatorPrivateStdin: true, auditStdin: true } }))
+  process.stdout.write(JSON.stringify({ ok: true, outcome: 'success', data: { schemaVersion: 1, protocolVersion: 1, auditMode: 'local_required', capabilities: { eventConsume: true, replyStdin: true, operatorPrivateStdin: true } }, meta: {} }))
   process.exit(0)
 }
 
 let input = ''
 if (operation === 'consume') {
-  process.stderr.write('[event] ready\\n')
+  process.stderr.write('[event] ready event_count=0 bus_pid=123\\n')
   const events = [
-    { schemaVersion: 1, eventId: 'event-allowed', messageId: 'message-allowed', conversationId: 'allowed-group', conversationType: 'group', senderOpenDingTalkId: 'allowed-open-id', senderName: '成员', text: '只应通过 stdin 回复的正文', createdAt: '1' },
-    { schemaVersion: 1, eventId: 'event-allowed', messageId: 'message-allowed', conversationId: 'allowed-group', conversationType: 'group', senderOpenDingTalkId: 'allowed-open-id', senderName: '成员', text: '重复正文', createdAt: '1' },
-    { schemaVersion: 1, eventId: 'event-denied', messageId: 'message-denied', conversationId: 'blocked-group', conversationType: 'group', senderOpenDingTalkId: 'intruder', senderName: '越权用户', text: '越权正文', createdAt: '2' },
-    { schemaVersion: 1, eventId: 'event-self', messageId: 'outgoing-1', conversationId: 'allowed-group', conversationType: 'group', senderOpenDingTalkId: 'employee-runtime-1', senderName: '数字员工', text: '自回复正文', createdAt: '3' },
+    { type: 'user_im_message_receive_group_all', event_id: 'event-allowed', message_id: 'message-allowed', conversation_id: 'allowed-group', sender_open_dingtalk_id: 'allowed-open-id', sender: '成员', content: '只应通过 stdin 回复的正文', event_time: '1' },
+    { type: 'user_im_message_receive_group_all', event_id: 'event-allowed', message_id: 'message-allowed', conversation_id: 'allowed-group', sender_open_dingtalk_id: 'allowed-open-id', sender: '成员', content: '重复正文', event_time: '1' },
+    { type: 'user_im_message_receive_group_all', event_id: 'event-denied', message_id: 'message-denied', conversation_id: 'blocked-group', sender_open_dingtalk_id: 'intruder', sender: '越权用户', content: '越权正文', create_time: '2' },
+    { type: 'user_im_message_receive_group_all', event_id: 'event-self', message_id: 'outgoing-1', conversation_id: 'allowed-group', sender_open_dingtalk_id: 'employee-runtime-1', sender: '数字员工', content: '自回复正文', timestamp: '3' },
   ]
   process.stdout.write('{bad json}\\n')
   const first = JSON.stringify(events[0])
@@ -100,8 +100,7 @@ if (operation === 'consume') {
   process.stdin.on('data', (chunk) => { input += chunk })
   process.stdin.on('end', () => {
     const value = input ? JSON.parse(input) : {}
-    if (operation === 'audit') process.stdout.write('{}')
-    else process.stdout.write(JSON.stringify({ openMessageId: operation === 'reply' ? 'outgoing-1' : 'operator-message-1', conversationId: value.conversationId || 'operator-conversation', deliveryStatus: 'delivered', idempotencyKey: value.idempotencyKey }))
+    process.stdout.write(JSON.stringify({ ok: true, outcome: 'success', data: { openMessageId: operation === 'reply' ? 'outgoing-1' : 'operator-message-1', conversationId: value.conversationId || 'operator-conversation', deliveryStatus: 'delivered', idempotencyKey: value.idempotencyKey }, meta: {} }))
   })
 }
 `
@@ -116,13 +115,10 @@ async function createRetryFakeDws(root) {
 const fs = require('node:fs')
 const args = process.argv.slice(2)
 if (args.includes('capabilities')) {
-  process.stdout.write(JSON.stringify({ schemaVersion: 1, protocolVersion: 1, capabilities: { eventConsume: true, replyStdin: true, operatorPrivateStdin: true, auditStdin: true } }))
+  process.stdout.write(JSON.stringify({ ok: true, outcome: 'success', data: { schemaVersion: 1, protocolVersion: 1, auditMode: 'local_required', capabilities: { eventConsume: true, replyStdin: true, operatorPrivateStdin: true } }, meta: {} }))
   process.exit(0)
 }
-if (args.includes('audit')) {
-  process.stdin.resume()
-  process.stdin.on('end', () => process.stdout.write('{}'))
-} else if (args.includes('consume')) {
+if (args.includes('consume')) {
   const file = process.env.FAKE_DWS_ATTEMPT_FILE
   let count = 0
   try { count = Number(fs.readFileSync(file, 'utf8')) || 0 } catch {}
@@ -133,7 +129,7 @@ if (args.includes('audit')) {
     if (process.env.FAKE_DWS_RETRYABLE !== 'unknown') process.stderr.write('retryable=' + process.env.FAKE_DWS_RETRYABLE + '\\n')
     process.exit(1)
   }
-  process.stderr.write('[event] ready\\n')
+  process.stderr.write('[event] ready event_count=0\\n')
   process.stdin.resume()
   process.stdin.on('end', () => process.exit(0))
   process.on('SIGTERM', () => process.exit(0))
@@ -147,27 +143,15 @@ if (args.includes('audit')) {
 async function createAuditFailFakeDws(root) {
   const command = path.join(root, 'dws-audit-fail')
   const source = `#!/usr/bin/env node
-const fs = require('node:fs')
 const args = process.argv.slice(2)
 if (args.includes('capabilities')) {
-  process.stdout.write(JSON.stringify({ schemaVersion: 1, protocolVersion: 1, capabilities: { eventConsume: true, replyStdin: true, operatorPrivateStdin: true, auditStdin: true } }))
+  process.stdout.write(JSON.stringify({ ok: true, outcome: 'success', data: { schemaVersion: 1, protocolVersion: 1, auditMode: 'local_required', capabilities: { eventConsume: true, replyStdin: true, operatorPrivateStdin: true } }, meta: {} }))
   process.exit(0)
 }
 
-if (args.includes('audit')) {
-  process.stdin.resume()
-  process.stdin.on('end', () => {
-    const file = process.env.FAKE_DWS_AUDIT_COUNT_FILE
-    let count = 0
-    try { count = Number(fs.readFileSync(file, 'utf8')) || 0 } catch {}
-    count++
-    fs.writeFileSync(file, String(count))
-    if (count > 1) process.exit(1)
-    process.stdout.write('{}')
-  })
-} else if (args.includes('consume')) {
-  process.stderr.write('[event] ready\\n')
-  process.stdout.write(JSON.stringify({ schemaVersion: 1, eventId: 'audit-blocked-event', messageId: 'audit-blocked-message', conversationId: 'allowed-group', conversationType: 'group', senderOpenDingTalkId: 'allowed-open-id', senderName: '成员', text: '不得进入 Agent 的正文', createdAt: '1' }) + '\\n')
+if (args.includes('consume')) {
+  process.stderr.write('[event] ready event_count=0\\n')
+  process.stdout.write(JSON.stringify({ type: 'user_im_message_receive_group_all', event_id: 'audit-blocked-event', message_id: 'audit-blocked-message', conversation_id: 'allowed-group', sender_open_dingtalk_id: 'allowed-open-id', sender: '成员', content: '不得进入 Agent 的正文', event_time: '1' }) + '\\n')
   process.stdin.resume()
   process.stdin.on('end', () => process.exit(0))
   process.on('SIGTERM', () => process.exit(0))
@@ -187,13 +171,10 @@ const file = process.env.FAKE_DWS_SUBSCRIPTION_STATE
 const readState = () => { try { return JSON.parse(fs.readFileSync(file, 'utf8')) } catch { return { attempts: 0, active: 0, maxActive: 0 } } }
 const writeState = (state) => fs.writeFileSync(file, JSON.stringify(state))
 if (args.includes('capabilities')) {
-  process.stdout.write(JSON.stringify({ schemaVersion: 1, protocolVersion: 1, capabilities: { eventConsume: true, replyStdin: true, operatorPrivateStdin: true, auditStdin: true } }))
+  process.stdout.write(JSON.stringify({ ok: true, outcome: 'success', data: { schemaVersion: 1, protocolVersion: 1, auditMode: 'local_required', capabilities: { eventConsume: true, replyStdin: true, operatorPrivateStdin: true } }, meta: {} }))
   process.exit(0)
 }
-if (args.includes('audit')) {
-  process.stdin.resume()
-  process.stdin.on('end', () => process.stdout.write('{}'))
-} else if (args.includes('consume')) {
+if (args.includes('consume')) {
   const state = readState()
   state.attempts++
   state.active++
@@ -211,7 +192,7 @@ if (args.includes('audit')) {
     process.stdin.on('end', () => {})
     process.on('SIGTERM', () => setTimeout(() => { clearInterval(hold); finish() }, 100))
   } else {
-    process.stderr.write('[event] ready\\n')
+    process.stderr.write('[event] ready bus_pid=456\\n')
     process.stdin.on('end', finish)
     process.on('SIGTERM', finish)
   }
@@ -381,11 +362,25 @@ test('fake DWS 验证 ready、半行/坏包隔离、白名单、去重、自回�
   assert.ok(records.every((item) => item.credentialEnvKeys.length === 0))
   assert.doesNotMatch(JSON.stringify(records), /回复正文|越权正文|自回复正文|must-not-reach-child/)
   assert.equal(records.filter((item) => item.operation === 'reply').length, 1)
+  const reply = records.find((item) => item.operation === 'reply')
+  assert.deepEqual(reply.args.slice(2), [
+    'dingtalk-tag',
+    'channel',
+    'reply',
+    '--channel',
+    'dsh',
+    '--stdin',
+    '--format',
+    'json',
+  ])
 
   assert.equal((await stat(stateDir)).mode & 0o777, 0o700)
   assert.equal((await stat(path.join(stateDir, 'ledger.json'))).mode & 0o777, 0o600)
   assert.equal((await stat(path.join(stateDir, 'runtime.json'))).mode & 0o777, 0o600)
+  assert.equal((await stat(path.join(stateDir, 'audit'))).mode & 0o777, 0o700)
+  assert.equal((await stat(path.join(stateDir, 'audit', 'employee-runtime-1.jsonl'))).mode & 0o777, 0o600)
   assert.doesNotMatch(await readFile(path.join(stateDir, 'ledger.json'), 'utf8'), /正文/)
+  assert.doesNotMatch(await readFile(path.join(stateDir, 'audit', 'employee-runtime-1.jsonl'), 'utf8'), /正文/)
 
   await runtime.stop()
   assert.equal(runtime.currentStatus().state, 'stopped')
@@ -491,42 +486,29 @@ test('ready 超时会等待旧订阅进程退出后再重试，不并行创建�
   assert.deepEqual(state, { attempts: 2, active: 1, maxActive: 1 })
 })
 
-test('远程审计中断时 fail-closed，不创建新 Agent 任务', async (t) => {
+test('本地审计不可写时 fail-closed，不创建新 Agent 任务', async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-dingtalk-de-audit-fail-'))
   const command = await createAuditFailFakeDws(root)
-  const countFile = path.join(root, 'audit-count')
-  const originalCountFile = process.env.FAKE_DWS_AUDIT_COUNT_FILE
-  process.env.FAKE_DWS_AUDIT_COUNT_FILE = countFile
   let runtime
   t.after(async () => {
     await runtime?.stop()
-    if (originalCountFile === undefined) delete process.env.FAKE_DWS_AUDIT_COUNT_FILE
-    else process.env.FAKE_DWS_AUDIT_COUNT_FILE = originalCountFile
     await rm(root, { recursive: true, force: true })
   })
   const accepted = []
-  const logs = []
+  const stateDir = path.join(root, 'state')
   runtime = new DwsDigitalEmployeeSource({
     employee: { ...employee, agentUuid: 'employee-audit-fail' },
-    stateDir: path.join(root, 'state'),
+    stateDir,
     dwsCommand: command,
     readyTimeoutMs: 1_000,
-    log: (line) => logs.push(line),
+    log: () => {},
     onMessage: (input) => accepted.push(input),
   })
+  await writeFile(path.join(stateDir, 'audit'), '阻止创建审计目录', 'utf8')
 
-  await runtime.start()
-  await waitFor(async () => {
-    try {
-      return Number(await readFile(countFile, 'utf8')) >= 2
-    } catch {
-      return false
-    }
-  })
-  await new Promise((resolve) => setTimeout(resolve, 20))
+  await assert.rejects(() => runtime.start())
   assert.equal(accepted.length, 0)
   assert.equal(runtime.currentStatus().failureCode, 'audit_unavailable')
-  assert.ok(logs.some((line) => line.includes('event rejected (dws_exit_1)')))
 })
 
 test('白名单先于调度且不同会话不受长任务阻塞', async (t) => {

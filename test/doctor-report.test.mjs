@@ -194,7 +194,7 @@ test('联网诊断异常和远端能力原因不会进入机器报告', async (t
   )
 })
 
-test('数字员工诊断按员工输出 Profile、能力、ready、订阅、事件、回复和远程审计且不含正文', async (t) => {
+test('数字员工诊断按员工输出 Profile、能力、ready、订阅、事件、回复和本地审计且不含正文', async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-dingtalk-de-doctor-'))
   t.after(() => import('node:fs/promises').then((fs) => fs.rm(root, { recursive: true, force: true })))
   const dshHome = await createProfile(
