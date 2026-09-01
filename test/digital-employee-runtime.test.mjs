@@ -172,19 +172,25 @@ const args = process.argv.slice(2)
 const file = process.env.FAKE_DWS_SUBSCRIPTION_STATE
 const readState = () => { try { return JSON.parse(fs.readFileSync(file, 'utf8')) } catch { return { attempts: 0, active: 0, maxActive: 0 } } }
 const writeState = (state) => fs.writeFileSync(file, JSON.stringify(state))
+const isAlive = (pid) => {
+  if (!Number.isInteger(pid) || pid <= 0) return false
+  try { process.kill(pid, 0); return true } catch { return false }
+}
 if (args.includes('capabilities')) {
   process.stdout.write(JSON.stringify({ ok: true, outcome: 'success', data: { schemaVersion: 1, protocolVersion: 1, auditMode: 'local_required', capabilities: { eventConsume: true, replyStdin: true, operatorPrivateStdin: true } }, meta: {} }))
   process.exit(0)
 }
 if (args.includes('consume')) {
   const state = readState()
+  const overlapsPrevious = state.pid !== process.pid && isAlive(state.pid)
   state.attempts++
-  state.active++
+  state.active = overlapsPrevious ? 2 : 1
   state.maxActive = Math.max(state.maxActive, state.active)
+  state.pid = process.pid
   writeState(state)
   const finish = () => {
     const latest = readState()
-    latest.active--
+    if (latest.pid === process.pid) latest.active = 0
     writeState(latest)
     process.exit(0)
   }
@@ -487,7 +493,10 @@ test('ready 超时会等待旧订阅进程退出后再重试，不并行创建�
 
   await runtime.start()
   const state = JSON.parse(await readFile(stateFile, 'utf8'))
-  assert.deepEqual(state, { attempts: 2, active: 1, maxActive: 1 })
+  assert.deepEqual(
+    { attempts: state.attempts, active: state.active, maxActive: state.maxActive },
+    { attempts: 2, active: 1, maxActive: 1 },
+  )
 })
 
 test('本地审计不可写时 fail-closed，不创建新 Agent 任务', async (t) => {
