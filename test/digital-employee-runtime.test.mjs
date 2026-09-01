@@ -27,6 +27,21 @@ const employee = {
   protocolVersion: 1,
 }
 
+async function writeFakeDwsCommand(root, name, source) {
+  const command = path.join(root, name)
+  if (process.platform !== 'win32') {
+    await writeFile(command, source, { mode: 0o755 })
+    await chmod(command, 0o755)
+    return command
+  }
+
+  const script = path.join(root, `${name}.cjs`)
+  const wrapper = path.join(root, `${name}.cmd`)
+  await writeFile(script, source, 'utf8')
+  await writeFile(wrapper, `@echo off\r\n"${process.execPath}" "%~dp0${name}.cjs" %*\r\n`, 'utf8')
+  return wrapper
+}
+
 test('本地白名单分别覆盖 operator、额外私聊、群白名单和默认拒绝', () => {
   const base = {
     schemaVersion: 1,
@@ -62,7 +77,6 @@ test('本地白名单分别覆盖 operator、额外私聊、群白名单和默�
 })
 
 async function createFakeDws(root) {
-  const command = path.join(root, 'dws')
   const source = `#!/usr/bin/env node
 const fs = require('node:fs')
 const record = process.env.FAKE_DWS_RECORD
@@ -104,13 +118,10 @@ if (operation === 'consume') {
   })
 }
 `
-  await writeFile(command, source, { mode: 0o755 })
-  await chmod(command, 0o755)
-  return command
+  return writeFakeDwsCommand(root, 'dws', source)
 }
 
 async function createRetryFakeDws(root) {
-  const command = path.join(root, 'dws-retry')
   const source = `#!/usr/bin/env node
 const fs = require('node:fs')
 const args = process.argv.slice(2)
@@ -135,13 +146,10 @@ if (args.includes('consume')) {
   process.on('SIGTERM', () => process.exit(0))
 }
 `
-  await writeFile(command, source, { mode: 0o755 })
-  await chmod(command, 0o755)
-  return command
+  return writeFakeDwsCommand(root, 'dws-retry', source)
 }
 
 async function createAuditFailFakeDws(root) {
-  const command = path.join(root, 'dws-audit-fail')
   const source = `#!/usr/bin/env node
 const args = process.argv.slice(2)
 if (args.includes('capabilities')) {
@@ -157,13 +165,10 @@ if (args.includes('consume')) {
   process.on('SIGTERM', () => process.exit(0))
 }
 `
-  await writeFile(command, source, { mode: 0o755 })
-  await chmod(command, 0o755)
-  return command
+  return writeFakeDwsCommand(root, 'dws-audit-fail', source)
 }
 
 async function createSlowExitFakeDws(root) {
-  const command = path.join(root, 'dws-slow-exit')
   const source = `#!/usr/bin/env node
 const fs = require('node:fs')
 const args = process.argv.slice(2)
@@ -198,9 +203,7 @@ if (args.includes('consume')) {
   }
 }
 `
-  await writeFile(command, source, { mode: 0o755 })
-  await chmod(command, 0o755)
-  return command
+  return writeFakeDwsCommand(root, 'dws-slow-exit', source)
 }
 
 function createHost() {
@@ -374,11 +377,13 @@ test('fake DWS 验证 ready、半行/坏包隔离、白名单、去重、自回�
     'json',
   ])
 
-  assert.equal((await stat(stateDir)).mode & 0o777, 0o700)
-  assert.equal((await stat(path.join(stateDir, 'ledger.json'))).mode & 0o777, 0o600)
-  assert.equal((await stat(path.join(stateDir, 'runtime.json'))).mode & 0o777, 0o600)
-  assert.equal((await stat(path.join(stateDir, 'audit'))).mode & 0o777, 0o700)
-  assert.equal((await stat(path.join(stateDir, 'audit', 'employee-runtime-1.jsonl'))).mode & 0o777, 0o600)
+  if (process.platform !== 'win32') {
+    assert.equal((await stat(stateDir)).mode & 0o777, 0o700)
+    assert.equal((await stat(path.join(stateDir, 'ledger.json'))).mode & 0o777, 0o600)
+    assert.equal((await stat(path.join(stateDir, 'runtime.json'))).mode & 0o777, 0o600)
+    assert.equal((await stat(path.join(stateDir, 'audit'))).mode & 0o777, 0o700)
+    assert.equal((await stat(path.join(stateDir, 'audit', 'employee-runtime-1.jsonl'))).mode & 0o777, 0o600)
+  }
   assert.doesNotMatch(await readFile(path.join(stateDir, 'ledger.json'), 'utf8'), /正文/)
   assert.doesNotMatch(await readFile(path.join(stateDir, 'audit', 'employee-runtime-1.jsonl'), 'utf8'), /正文/)
 
@@ -407,7 +412,9 @@ test('ledger 损坏时隔离目标员工并持久化 doctor 可见的 fail-close
   const status = JSON.parse(await readFile(path.join(stateDir, 'runtime.json'), 'utf8'))
   assert.equal(status.state, 'failed')
   assert.equal(status.failureCode, 'ledger_corrupt')
-  assert.equal((await stat(path.join(stateDir, 'runtime.json'))).mode & 0o777, 0o600)
+  if (process.platform !== 'win32') {
+    assert.equal((await stat(path.join(stateDir, 'runtime.json'))).mode & 0o777, 0o600)
+  }
 })
 
 test('启动失败严格执行 retryable=false/true/unknown 的 0/2/1 重试预算', async (t) => {
@@ -576,7 +583,7 @@ test('无机器人时启动两个数字员工，复用 Bridge/Queue/Session 并�
   await writeFile(path.join(root, '.keep'), '')
   await mkdir(binDir, { recursive: true })
   const fake = await createFakeDws(binDir)
-  assert.equal(fake, path.join(binDir, 'dws'))
+  assert.equal(fake, path.join(binDir, process.platform === 'win32' ? 'dws.cmd' : 'dws'))
   const recordFile = path.join(root, 'host-invocations.ndjson')
   const stateDir = path.join(root, 'state')
   const originalPath = process.env.PATH

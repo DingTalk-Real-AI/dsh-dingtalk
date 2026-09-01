@@ -18,8 +18,10 @@ test('员工级本地审计使用私有 JSONL 且不保存消息正文', async (
 
   const directory = path.join(root, 'audit')
   const file = path.join(directory, 'employee-1.jsonl')
-  assert.equal((await stat(directory)).mode & 0o777, 0o700)
-  assert.equal((await stat(file)).mode & 0o777, 0o600)
+  if (process.platform !== 'win32') {
+    assert.equal((await stat(directory)).mode & 0o777, 0o700)
+    assert.equal((await stat(file)).mode & 0o777, 0o600)
+  }
   const content = await readFile(file, 'utf8')
   const entries = content.trim().split('\n').map(JSON.parse)
   assert.equal(entries.length, 2)
