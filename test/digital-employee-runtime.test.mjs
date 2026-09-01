@@ -27,19 +27,16 @@ const employee = {
   protocolVersion: 1,
 }
 
-async function writeFakeDwsCommand(root, name, source) {
-  const command = path.join(root, name)
-  if (process.platform !== 'win32') {
+async function writeFakeDwsCommand(root, name, source, pathCommand = false) {
+  if (pathCommand) {
+    const command = path.join(root, name)
     await writeFile(command, source, { mode: 0o755 })
     await chmod(command, 0o755)
-    return command
+    return { dwsCommand: command, dwsArgsPrefix: [] }
   }
-
   const script = path.join(root, `${name}.cjs`)
-  const wrapper = path.join(root, `${name}.cmd`)
   await writeFile(script, source, 'utf8')
-  await writeFile(wrapper, `@echo off\r\n"${process.execPath}" "%~dp0${name}.cjs" %*\r\n`, 'utf8')
-  return wrapper
+  return { dwsCommand: process.execPath, dwsArgsPrefix: [script] }
 }
 
 test('本地白名单分别覆盖 operator、额外私聊、群白名单和默认拒绝', () => {
@@ -76,7 +73,7 @@ test('本地白名单分别覆盖 operator、额外私聊、群白名单和默�
   )
 })
 
-async function createFakeDws(root) {
+async function createFakeDws(root, pathCommand = false) {
   const source = `#!/usr/bin/env node
 const fs = require('node:fs')
 const record = process.env.FAKE_DWS_RECORD
@@ -118,7 +115,7 @@ if (operation === 'consume') {
   })
 }
 `
-  return writeFakeDwsCommand(root, 'dws', source)
+  return writeFakeDwsCommand(root, 'dws', source, pathCommand)
 }
 
 async function createRetryFakeDws(root) {
@@ -308,7 +305,7 @@ test('fake DWS 验证 ready、半行/坏包隔离、白名单、去重、自回�
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-dingtalk-de-runtime-'))
   const stateDir = path.join(root, 'state')
   const recordFile = path.join(root, 'invocations.ndjson')
-  const dwsCommand = await createFakeDws(root)
+  const dwsInvocation = await createFakeDws(root)
   const originalRecord = process.env.FAKE_DWS_RECORD
   const originalToken = process.env.DWS_ACCESS_TOKEN
   let runtime
@@ -328,7 +325,7 @@ test('fake DWS 验证 ready、半行/坏包隔离、白名单、去重、自回�
   runtime = new DwsDigitalEmployeeSource({
     employee,
     stateDir,
-    dwsCommand,
+    ...dwsInvocation,
     readyTimeoutMs: 2_000,
     log: (line) => logs.push(line),
     onMessage: async (input) => {
@@ -419,7 +416,7 @@ test('ledger 损坏时隔离目标员工并持久化 doctor 可见的 fail-close
 
 test('启动失败严格执行 retryable=false/true/unknown 的 0/2/1 重试预算', async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-dingtalk-de-retry-'))
-  const command = await createRetryFakeDws(root)
+  const dwsInvocation = await createRetryFakeDws(root)
   const originalAttempt = process.env.FAKE_DWS_ATTEMPT_FILE
   const originalFailCount = process.env.FAKE_DWS_FAIL_COUNT
   const originalRetryable = process.env.FAKE_DWS_RETRYABLE
@@ -449,7 +446,7 @@ test('启动失败严格执行 retryable=false/true/unknown 的 0/2/1 重试预�
     const runtime = new DwsDigitalEmployeeSource({
       employee: { ...employee, agentUuid: `employee-retry-${scenario.hint}` },
       stateDir: path.join(root, `state-${scenario.hint}`),
-      dwsCommand: command,
+      ...dwsInvocation,
       readyTimeoutMs: 1_000,
       log: () => {},
       onMessage: () => {},
@@ -469,14 +466,14 @@ test('启动失败严格执行 retryable=false/true/unknown 的 0/2/1 重试预�
 
 test('ready 超时会等待旧订阅进程退出后再重试，不并行创建等价订阅', async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-dingtalk-de-no-overlap-'))
-  const command = await createSlowExitFakeDws(root)
+  const dwsInvocation = await createSlowExitFakeDws(root)
   const stateFile = path.join(root, 'subscription-state.json')
   const originalStateFile = process.env.FAKE_DWS_SUBSCRIPTION_STATE
   process.env.FAKE_DWS_SUBSCRIPTION_STATE = stateFile
   const runtime = new DwsDigitalEmployeeSource({
     employee: { ...employee, agentUuid: 'employee-no-overlap' },
     stateDir: path.join(root, 'state'),
-    dwsCommand: command,
+    ...dwsInvocation,
     readyTimeoutMs: 300,
     log: () => {},
     onMessage: () => {},
@@ -495,7 +492,7 @@ test('ready 超时会等待旧订阅进程退出后再重试，不并行创建�
 
 test('本地审计不可写时 fail-closed，不创建新 Agent 任务', async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-dingtalk-de-audit-fail-'))
-  const command = await createAuditFailFakeDws(root)
+  const dwsInvocation = await createAuditFailFakeDws(root)
   let runtime
   t.after(async () => {
     await runtime?.stop()
@@ -506,7 +503,7 @@ test('本地审计不可写时 fail-closed，不创建新 Agent 任务', async (
   runtime = new DwsDigitalEmployeeSource({
     employee: { ...employee, agentUuid: 'employee-audit-fail' },
     stateDir,
-    dwsCommand: command,
+    ...dwsInvocation,
     readyTimeoutMs: 1_000,
     log: () => {},
     onMessage: (input) => accepted.push(input),
@@ -577,67 +574,71 @@ test('白名单先于调度且不同会话不受长任务阻塞', async (t) => {
   assert.deepEqual(seen, ['ordinary-event', 'control-event'])
 })
 
-test('无机器人时启动两个数字员工，复用 Bridge/Queue/Session 并在重启后抑制重复回复', async (t) => {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-dingtalk-de-host-'))
-  const binDir = path.join(root, 'bin')
-  await writeFile(path.join(root, '.keep'), '')
-  await mkdir(binDir, { recursive: true })
-  const fake = await createFakeDws(binDir)
-  assert.equal(fake, path.join(binDir, process.platform === 'win32' ? 'dws.cmd' : 'dws'))
-  const recordFile = path.join(root, 'host-invocations.ndjson')
-  const stateDir = path.join(root, 'state')
-  const originalPath = process.env.PATH
-  const originalRecord = process.env.FAKE_DWS_RECORD
-  const originalState = process.env.DSH_DINGTALK_STATE_DIR
-  process.env.PATH = `${binDir}${path.delimiter}${originalPath ?? ''}`
-  process.env.FAKE_DWS_RECORD = recordFile
-  process.env.DSH_DINGTALK_STATE_DIR = stateDir
-  const hosts = []
-  t.after(async () => {
-    for (const host of hosts) host.dispose()
-    await new Promise((resolve) => setTimeout(resolve, 20))
-    if (originalPath === undefined) delete process.env.PATH
-    else process.env.PATH = originalPath
-    if (originalRecord === undefined) delete process.env.FAKE_DWS_RECORD
-    else process.env.FAKE_DWS_RECORD = originalRecord
-    if (originalState === undefined) delete process.env.DSH_DINGTALK_STATE_DIR
-    else process.env.DSH_DINGTALK_STATE_DIR = originalState
-    await rm(root, { recursive: true, force: true })
-  })
+test(
+  '无机器人时启动两个数字员工，复用 Bridge/Queue/Session 并在重启后抑制重复回复',
+  { skip: process.platform === 'win32' ? 'Windows PATH 测试不能安全执行脚本型 fake DWS' : false },
+  async (t) => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-dingtalk-de-host-'))
+    const binDir = path.join(root, 'bin')
+    await writeFile(path.join(root, '.keep'), '')
+    await mkdir(binDir, { recursive: true })
+    const fake = await createFakeDws(binDir, true)
+    assert.equal(fake.dwsCommand, path.join(binDir, 'dws'))
+    const recordFile = path.join(root, 'host-invocations.ndjson')
+    const stateDir = path.join(root, 'state')
+    const originalPath = process.env.PATH
+    const originalRecord = process.env.FAKE_DWS_RECORD
+    const originalState = process.env.DSH_DINGTALK_STATE_DIR
+    process.env.PATH = `${binDir}${path.delimiter}${originalPath ?? ''}`
+    process.env.FAKE_DWS_RECORD = recordFile
+    process.env.DSH_DINGTALK_STATE_DIR = stateDir
+    const hosts = []
+    t.after(async () => {
+      for (const host of hosts) host.dispose()
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      if (originalPath === undefined) delete process.env.PATH
+      else process.env.PATH = originalPath
+      if (originalRecord === undefined) delete process.env.FAKE_DWS_RECORD
+      else process.env.FAKE_DWS_RECORD = originalRecord
+      if (originalState === undefined) delete process.env.DSH_DINGTALK_STATE_DIR
+      else process.env.DSH_DINGTALK_STATE_DIR = originalState
+      await rm(root, { recursive: true, force: true })
+    })
 
-  const employees = [
-    employee,
-    { ...employee, agentUuid: 'employee-runtime-2', dwsProfile: 'corp-runtime:user-runtime-2' },
-  ]
-  const first = createHost()
-  hosts.push(first)
-  await apply(first.ctx, pluginConfig(path.join(root, 'workspace'), employees))
-  await waitFor(async () => {
-    try {
-      const records = (await readFile(recordFile, 'utf8'))
-        .trim()
-        .split('\n')
-        .map((line) => JSON.parse(line))
-      return first.followups.length === 2 && records.filter((item) => item.operation === 'reply').length === 2
-    } catch {
-      return false
-    }
-  })
-  assert.equal(new Set(first.followups.map((item) => item.sessionId)).size, 2)
-  assert.ok(first.followups.every((item) => item.message.content[0].text === '只应通过 stdin 回复的正文'))
+    const employees = [
+      employee,
+      { ...employee, agentUuid: 'employee-runtime-2', dwsProfile: 'corp-runtime:user-runtime-2' },
+    ]
+    const first = createHost()
+    hosts.push(first)
+    await apply(first.ctx, pluginConfig(path.join(root, 'workspace'), employees))
+    await waitFor(async () => {
+      try {
+        const records = (await readFile(recordFile, 'utf8'))
+          .trim()
+          .split('\n')
+          .map((line) => JSON.parse(line))
+        return first.followups.length === 2 && records.filter((item) => item.operation === 'reply').length === 2
+      } catch {
+        return false
+      }
+    })
+    assert.equal(new Set(first.followups.map((item) => item.sessionId)).size, 2)
+    assert.ok(first.followups.every((item) => item.message.content[0].text === '只应通过 stdin 回复的正文'))
 
-  first.dispose()
-  await new Promise((resolve) => setTimeout(resolve, 50))
-  const beforeRestart = (await readFile(recordFile, 'utf8'))
-    .split('\n')
-    .filter((line) => line.includes('"operation":"reply"')).length
-  const second = createHost()
-  hosts.push(second)
-  await apply(second.ctx, pluginConfig(path.join(root, 'workspace'), employees))
-  await new Promise((resolve) => setTimeout(resolve, 150))
-  const afterRestart = (await readFile(recordFile, 'utf8'))
-    .split('\n')
-    .filter((line) => line.includes('"operation":"reply"')).length
-  assert.equal(second.followups.length, 0)
-  assert.equal(afterRestart, beforeRestart)
-})
+    first.dispose()
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    const beforeRestart = (await readFile(recordFile, 'utf8'))
+      .split('\n')
+      .filter((line) => line.includes('"operation":"reply"')).length
+    const second = createHost()
+    hosts.push(second)
+    await apply(second.ctx, pluginConfig(path.join(root, 'workspace'), employees))
+    await new Promise((resolve) => setTimeout(resolve, 150))
+    const afterRestart = (await readFile(recordFile, 'utf8'))
+      .split('\n')
+      .filter((line) => line.includes('"operation":"reply"')).length
+    assert.equal(second.followups.length, 0)
+    assert.equal(afterRestart, beforeRestart)
+  },
+)

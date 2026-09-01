@@ -34,6 +34,7 @@ export interface DigitalEmployeeRuntimeOptions {
   employee: DigitalEmployeeConfig
   stateDir: string
   dwsCommand?: string
+  dwsArgsPrefix?: readonly string[]
   readyTimeoutMs?: number
   log(line: string): void
   onMessage(input: DigitalEmployeeInbound): void | Promise<void>
@@ -129,6 +130,7 @@ export class DwsDigitalEmployeeSource implements InboundSource {
     this.replySink = new DwsDigitalEmployeeReplySink({
       employee: options.employee,
       dwsCommand: options.dwsCommand,
+      dwsArgsPrefix: options.dwsArgsPrefix,
       ledger: this.ledger,
       auditSink: new LocalDigitalEmployeeAuditLog(options.stateDir, options.employee.agentUuid),
       onFailure: (code) => this.fail(code),
@@ -178,6 +180,7 @@ export class DwsDigitalEmployeeSource implements InboundSource {
   private async startConsumer(): Promise<void> {
     const command = this.options.dwsCommand ?? 'dws'
     const args = [
+      ...(this.options.dwsArgsPrefix ?? []),
       '--profile',
       this.options.employee.dwsProfile,
       'event',

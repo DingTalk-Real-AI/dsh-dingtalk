@@ -37,6 +37,7 @@ export interface DigitalEmployeeControlSink extends DigitalEmployeeReplySink, Di
 interface DwsDigitalEmployeeReplySinkOptions {
   employee: DigitalEmployeeConfig
   dwsCommand?: string
+  dwsArgsPrefix?: readonly string[]
   ledger: DigitalEmployeeLedger
   auditSink: DigitalEmployeeAuditSink
   onFailure(code: string): void
@@ -236,8 +237,9 @@ export class DwsDigitalEmployeeReplySink implements DigitalEmployeeControlSink {
 
   private execJson(args: string[], input?: unknown): Promise<unknown> {
     const command = this.options.dwsCommand ?? 'dws'
+    const commandArgs = [...(this.options.dwsArgsPrefix ?? []), ...args]
     return new Promise((resolve, reject) => {
-      const child = spawn(command, args, {
+      const child = spawn(command, commandArgs, {
         shell: false,
         stdio: ['pipe', 'pipe', 'pipe'],
         env: sanitizedDwsEnvironment(process.env),
