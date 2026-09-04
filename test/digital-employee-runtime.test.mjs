@@ -111,7 +111,8 @@ if (operation === 'consume') {
   process.stdin.on('data', (chunk) => { input += chunk })
   process.stdin.on('end', () => {
     const value = input ? JSON.parse(input) : {}
-    process.stdout.write(JSON.stringify({ ok: true, outcome: 'success', data: { openMessageId: operation === 'reply' ? 'outgoing-1' : 'operator-message-1', conversationId: value.conversationId || 'operator-conversation', deliveryStatus: 'delivered', idempotencyKey: value.idempotencyKey }, meta: {} }))
+    const openMessageId = process.env.FAKE_DWS_EMPTY_RECEIPT === '1' ? '' : operation === 'reply' ? 'outgoing-1' : 'operator-message-1'
+    process.stdout.write(JSON.stringify({ ok: true, outcome: 'success', data: { openMessageId, conversationId: value.conversationId || 'operator-conversation', deliveryStatus: 'delivered', idempotencyKey: value.idempotencyKey }, meta: {} }))
   })
 }
 `
@@ -343,7 +344,11 @@ test('fake DWS 验证 ready、半行/坏包隔离、白名单、去重、自回�
   await waitFor(() => accepted.length === 1 && runtime.currentStatus().lastReplyAt)
   await new Promise((resolve) => setTimeout(resolve, 100))
 
-  assert.equal(runtime.currentStatus().state, 'ready')
+  const currentStatus = runtime.currentStatus()
+  assert.equal(currentStatus.state, 'ready')
+  assert.ok(currentStatus.observedAt >= currentStatus.lastEventAt)
+  assert.ok(currentStatus.observedAt >= currentStatus.lastReplyAt)
+  assert.ok(currentStatus.observedAt >= currentStatus.lastAuditAt)
   assert.equal(accepted.length, 1)
   assert.equal(accepted[0].scopeKey, 'employee-runtime-1:allowed-group#allowed-open-id')
   assert.equal(accepted[0].message.text, '只应通过 stdin 回复的正文')
@@ -418,6 +423,53 @@ test('ledger 损坏时隔离目标员工并持久化 doctor 可见的 fail-close
   if (process.platform !== 'win32') {
     assert.equal((await stat(path.join(stateDir, 'runtime.json'))).mode & 0o777, 0o600)
   }
+})
+
+test('DWS 空消息 ID 回执会 fail-closed 且不会污染自回复 ledger', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-dingtalk-de-empty-receipt-'))
+  const stateDir = path.join(root, 'state')
+  const recordFile = path.join(root, 'invocations.ndjson')
+  const dwsInvocation = await createFakeDws(root)
+  const originalRecord = process.env.FAKE_DWS_RECORD
+  const originalEmptyReceipt = process.env.FAKE_DWS_EMPTY_RECEIPT
+  process.env.FAKE_DWS_RECORD = recordFile
+  process.env.FAKE_DWS_EMPTY_RECEIPT = '1'
+  const runtime = new DwsDigitalEmployeeSource({
+    employee,
+    stateDir,
+    ...dwsInvocation,
+    log: () => {},
+    onMessage: () => {},
+  })
+  t.after(async () => {
+    await runtime.stop()
+    if (originalRecord === undefined) delete process.env.FAKE_DWS_RECORD
+    else process.env.FAKE_DWS_RECORD = originalRecord
+    if (originalEmptyReceipt === undefined) delete process.env.FAKE_DWS_EMPTY_RECEIPT
+    else process.env.FAKE_DWS_EMPTY_RECEIPT = originalEmptyReceipt
+    await rm(root, { recursive: true, force: true })
+  })
+
+  await assert.rejects(
+    runtime.replySink.reply(
+      {
+        schemaVersion: 1,
+        eventId: 'empty-receipt-event',
+        messageId: 'incoming-message',
+        conversationId: 'allowed-group',
+        conversationType: 'group',
+        senderOpenDingTalkId: 'allowed-open-id',
+        senderName: '成员',
+        text: '不应写入 ledger 的回复',
+        createdAt: '1',
+      },
+      'session-1',
+      '回复正文',
+    ),
+    /invalid_reply_result/,
+  )
+  await assert.rejects(readFile(path.join(stateDir, 'ledger.json'), 'utf8'), { code: 'ENOENT' })
+  assert.equal(runtime.currentStatus().failureCode, 'invalid_reply_result')
 })
 
 test('启动失败严格执行 retryable=false/true/unknown 的 0/2/1 重试预算', async (t) => {

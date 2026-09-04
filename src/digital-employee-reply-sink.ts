@@ -107,6 +107,7 @@ export class DwsDigitalEmployeeReplySink implements DigitalEmployeeControlSink {
     const raw = result as Record<string, unknown>
     if (
       typeof raw.openMessageId !== 'string' ||
+      raw.openMessageId.trim() === '' ||
       raw.conversationId !== event.conversationId ||
       (raw.deliveryStatus !== 'delivered' && raw.deliveryStatus !== 'unknown') ||
       raw.idempotencyKey !== key
@@ -163,7 +164,9 @@ export class DwsDigitalEmployeeReplySink implements DigitalEmployeeControlSink {
     const raw = result as Record<string, unknown>
     if (
       typeof raw.openMessageId !== 'string' ||
+      raw.openMessageId.trim() === '' ||
       typeof raw.conversationId !== 'string' ||
+      raw.conversationId.trim() === '' ||
       (raw.deliveryStatus !== 'delivered' && raw.deliveryStatus !== 'unknown') ||
       raw.idempotencyKey !== key
     ) {

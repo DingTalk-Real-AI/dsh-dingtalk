@@ -134,8 +134,8 @@ export class DwsDigitalEmployeeSource implements InboundSource {
       ledger: this.ledger,
       auditSink: new LocalDigitalEmployeeAuditLog(options.stateDir, options.employee.agentUuid),
       onFailure: (code) => this.fail(code),
-      onReply: () => this.updateStatus({ ...this.status, state: 'ready', lastReplyAt: Date.now() }),
-      onAudit: () => this.updateStatus({ ...this.status, lastAuditAt: Date.now() }),
+      onReply: () => this.updateStatus({ state: 'ready', lastReplyAt: Date.now() }),
+      onAudit: () => this.updateStatus({ lastAuditAt: Date.now() }),
     })
   }
 
@@ -171,7 +171,6 @@ export class DwsDigitalEmployeeSource implements InboundSource {
   private async probe(): Promise<void> {
     await this.replySink.probe()
     this.updateStatus({
-      ...this.status,
       capabilitiesVerifiedAt: Date.now(),
       subscriptionTopics: ['user_im_message_receive_o2o_all', 'user_im_message_receive_group_all'],
     })
@@ -329,7 +328,7 @@ export class DwsDigitalEmployeeSource implements InboundSource {
     if (this.ledger.hasEvent(event.eventId) || this.ledger.hasSentMessage(event.messageId)) return
     if (this.status.state === 'failed') throw new Error('digital_employee_fail_closed')
     this.ledger.markEvent(event.eventId)
-    this.updateStatus({ ...this.status, state: 'ready', lastEventAt: Date.now() })
+    this.updateStatus({ state: 'ready', lastEventAt: Date.now() })
     void Promise.resolve(
       this.options.onMessage({
         event,
@@ -341,7 +340,7 @@ export class DwsDigitalEmployeeSource implements InboundSource {
 
   private fail(code: string): void {
     this.stopHeartbeat()
-    this.updateStatus({ ...this.status, state: 'failed', failureCode: code })
+    this.updateStatus({ state: 'failed', failureCode: code })
   }
 
   private async terminateChild(child: ChildProcessWithoutNullStreams): Promise<void> {
@@ -359,7 +358,7 @@ export class DwsDigitalEmployeeSource implements InboundSource {
   private startHeartbeat(): void {
     this.stopHeartbeat()
     this.heartbeat = setInterval(() => {
-      if (this.status.state === 'ready') this.updateStatus({ ...this.status, state: 'ready' })
+      if (this.status.state === 'ready') this.updateStatus({ state: 'ready' })
     }, STATUS_HEARTBEAT_MS)
     this.heartbeat.unref()
   }
@@ -369,8 +368,8 @@ export class DwsDigitalEmployeeSource implements InboundSource {
     this.heartbeat = undefined
   }
 
-  private updateStatus(next: Omit<DigitalEmployeeRuntimeStatus, 'observedAt'> & { observedAt?: number }): void {
-    this.status = { ...this.status, ...next, observedAt: next.observedAt ?? Date.now() }
+  private updateStatus(next: Partial<Omit<DigitalEmployeeRuntimeStatus, 'observedAt'>>): void {
+    this.status = { ...this.status, ...next, observedAt: Date.now() }
     if (next.state && next.state !== 'failed') delete this.status.failureCode
     mkdirSync(this.options.stateDir, { recursive: true, mode: 0o700 })
     const file = path.join(this.options.stateDir, 'runtime.json')
