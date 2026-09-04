@@ -20,6 +20,39 @@ export type ImageMode = 'auto' | 'always' | 'never'
 export type SenderAccess = 'all' | 'owner' | 'allowlist'
 export type GroupAccess = 'all' | 'none' | 'allowlist'
 
+export interface DigitalEmployeeConfig {
+  agentUuid: string
+  name?: string
+  enabled: boolean
+  dwsProfile: string
+  operatorOpenDingTalkId: string
+  allowedDirectSenders: string[]
+  allowedGroups: string[]
+  sessionScope: 'chat' | 'chat-sender'
+  protocolVersion: 1
+}
+
+export interface DigitalEmployeeRegistration {
+  schemaVersion: 1
+  agentUuid: string
+  name?: string
+  dwsProfile: string
+  operatorOpenDingTalkId: string
+  protocolVersion: 1
+}
+
+export interface DigitalEmployeeAccess {
+  allowedDirectSenders: string[]
+  allowedGroups: string[]
+  sessionScope: 'chat' | 'chat-sender'
+}
+
+export interface DigitalEmployeeMutationResult {
+  status: 'created' | 'updated' | 'unchanged' | 'removed' | 'not_found'
+  restartRequired: boolean
+  agentUuid: string
+}
+
 export interface WebProfileConfig {
   dwsEnabled: boolean
   imageMode: ImageMode
@@ -31,6 +64,7 @@ export interface WebProfileConfig {
   groupAllowlist: string[]
   sessionScope: 'chat' | 'chat-sender'
   accounts: WebProfileAccount[]
+  digitalEmployees: DigitalEmployeeConfig[]
 }
 
 export interface WebProfileAccount extends AccountCredentialRefs {
@@ -472,6 +506,215 @@ async function writeWebProfile(
   await atomicPrivateWrite(file, stringify(entries, { lineWidth: 0 }))
 }
 
+const DIGITAL_EMPLOYEE_FIELDS = new Set([
+  'schemaVersion',
+  'agentUuid',
+  'name',
+  'dwsProfile',
+  'operatorOpenDingTalkId',
+  'protocolVersion',
+])
+const DIGITAL_EMPLOYEE_CONFIG_FIELDS = new Set([
+  'agentUuid',
+  'name',
+  'enabled',
+  'dwsProfile',
+  'operatorOpenDingTalkId',
+  'allowedDirectSenders',
+  'allowedGroups',
+  'sessionScope',
+  'protocolVersion',
+])
+const SENSITIVE_FIELD = /(token|auth.?code|secret|password|credential)/i
+
+function digitalEmployeeStringList(value: unknown, field: string): string[] {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== 'string' || !item.trim())) {
+    throw new Error(`invalid_${field}`)
+  }
+  return [...new Set(value.map((item) => (item as string).trim()))]
+}
+
+function assertSafeDigitalEmployeeId(value: unknown): asserts value is string {
+  if (typeof value !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value)) {
+    throw new Error('invalid_agent_uuid')
+  }
+}
+
+function assertDwsProfile(value: unknown): asserts value is string {
+  if (typeof value !== 'string' || value.length > 256 || !/^[^\s:]+:[^\s:]+$/.test(value)) {
+    throw new Error('invalid_dws_profile')
+  }
+}
+
+function assertStableIdentity(value: unknown, field: string): asserts value is string {
+  if (typeof value !== 'string' || !value.trim() || value.length > 256 || /\s/.test(value)) {
+    throw new Error(`invalid_${field}`)
+  }
+}
+
+function validateDigitalEmployeeRegistration(value: unknown): DigitalEmployeeRegistration {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid_registration')
+  const raw = value as Record<string, unknown>
+  for (const field of Object.keys(raw)) {
+    if (SENSITIVE_FIELD.test(field)) throw new Error('sensitive_field')
+    if (!DIGITAL_EMPLOYEE_FIELDS.has(field)) throw new Error('unknown_field')
+  }
+  if (raw.schemaVersion !== 1) throw new Error('unsupported_schema_version')
+  if (raw.protocolVersion !== 1) throw new Error('unsupported_protocol_version')
+  assertSafeDigitalEmployeeId(raw.agentUuid)
+  assertDwsProfile(raw.dwsProfile)
+  assertStableIdentity(raw.operatorOpenDingTalkId, 'operator')
+  if (raw.name !== undefined && (typeof raw.name !== 'string' || !raw.name.trim() || raw.name.length > 128)) {
+    throw new Error('invalid_name')
+  }
+  return {
+    schemaVersion: 1,
+    agentUuid: raw.agentUuid,
+    ...(typeof raw.name === 'string' ? { name: raw.name.trim() } : {}),
+    dwsProfile: raw.dwsProfile,
+    operatorOpenDingTalkId: raw.operatorOpenDingTalkId,
+    protocolVersion: 1,
+  }
+}
+
+function parseDigitalEmployee(value: unknown): DigitalEmployeeConfig {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid_digital_employee')
+  const raw = value as Record<string, unknown>
+  for (const field of Object.keys(raw)) {
+    if (SENSITIVE_FIELD.test(field)) throw new Error('sensitive_field')
+    if (!DIGITAL_EMPLOYEE_CONFIG_FIELDS.has(field)) throw new Error('unknown_digital_employee_field')
+  }
+  assertSafeDigitalEmployeeId(raw.agentUuid)
+  assertDwsProfile(raw.dwsProfile)
+  assertStableIdentity(raw.operatorOpenDingTalkId, 'operator')
+  if (raw.protocolVersion !== 1) throw new Error('unsupported_protocol_version')
+  if (raw.name !== undefined && (typeof raw.name !== 'string' || !raw.name.trim() || raw.name.length > 128)) {
+    throw new Error('invalid_name')
+  }
+  if (raw.enabled !== undefined && typeof raw.enabled !== 'boolean') throw new Error('invalid_enabled')
+  if (raw.sessionScope !== undefined && raw.sessionScope !== 'chat' && raw.sessionScope !== 'chat-sender') {
+    throw new Error('invalid_session_scope')
+  }
+  return {
+    agentUuid: raw.agentUuid,
+    ...(typeof raw.name === 'string' ? { name: raw.name.trim() } : {}),
+    enabled: raw.enabled !== false,
+    dwsProfile: raw.dwsProfile,
+    operatorOpenDingTalkId: raw.operatorOpenDingTalkId,
+    allowedDirectSenders:
+      raw.allowedDirectSenders === undefined
+        ? []
+        : digitalEmployeeStringList(raw.allowedDirectSenders, 'allowed_direct_senders'),
+    allowedGroups:
+      raw.allowedGroups === undefined ? [] : digitalEmployeeStringList(raw.allowedGroups, 'allowed_groups'),
+    sessionScope: raw.sessionScope === 'chat-sender' ? 'chat-sender' : 'chat',
+    protocolVersion: 1,
+  }
+}
+
+function parseDigitalEmployees(value: unknown): DigitalEmployeeConfig[] {
+  if (value === undefined) return []
+  if (!Array.isArray(value)) throw new Error('invalid_digital_employees')
+  const employees = value.map(parseDigitalEmployee)
+  const uuids = new Set<string>()
+  const profiles = new Set<string>()
+  for (const employee of employees) {
+    if (uuids.has(employee.agentUuid)) throw new Error('duplicate_agent_uuid')
+    if (profiles.has(employee.dwsProfile)) throw new Error('duplicate_dws_profile')
+    uuids.add(employee.agentUuid)
+    profiles.add(employee.dwsProfile)
+  }
+  return employees
+}
+
+/** 配置加载、运行时和 CLI 共用同一套严格数字员工校验。 */
+export function validateDigitalEmployeeConfigs(value: unknown): DigitalEmployeeConfig[] {
+  return parseDigitalEmployees(value)
+}
+
+export async function registerDigitalEmployee(dshHome: string, value: unknown): Promise<DigitalEmployeeMutationResult> {
+  const registration = validateDigitalEmployeeRegistration(value)
+  const file = path.join(dshHome, 'profiles', 'web', 'cordis.patch.yml')
+  return withWebProfileLock(file, async () => {
+    const entries = profileEntries(await readOptional(file), file)
+    const { current, config } = ownedPluginConfig(entries)
+    const employees = parseDigitalEmployees(config.digitalEmployees)
+    const duplicateProfile = employees.find(
+      (employee) => employee.dwsProfile === registration.dwsProfile && employee.agentUuid !== registration.agentUuid,
+    )
+    if (duplicateProfile) throw new Error('duplicate_dws_profile')
+    const existing = employees.find((employee) => employee.agentUuid === registration.agentUuid)
+    const next: DigitalEmployeeConfig = {
+      agentUuid: registration.agentUuid,
+      ...(registration.name ? { name: registration.name } : {}),
+      enabled: true,
+      dwsProfile: registration.dwsProfile,
+      operatorOpenDingTalkId: registration.operatorOpenDingTalkId,
+      allowedDirectSenders: existing?.allowedDirectSenders ?? [],
+      allowedGroups: existing?.allowedGroups ?? [],
+      sessionScope: existing?.sessionScope ?? 'chat',
+      protocolVersion: 1,
+    }
+    if (existing !== undefined && JSON.stringify(existing) === JSON.stringify(next)) {
+      return { status: 'unchanged', restartRequired: false, agentUuid: registration.agentUuid }
+    }
+    if (existing) {
+      if (!registration.name) delete existing.name
+      Object.assign(existing, next)
+    } else employees.push(next)
+    config.digitalEmployees = employees
+    await writeWebProfile(file, entries, current, config)
+    return {
+      status: existing ? 'updated' : 'created',
+      restartRequired: true,
+      agentUuid: registration.agentUuid,
+    }
+  })
+}
+
+export async function unregisterDigitalEmployee(
+  dshHome: string,
+  agentUuid: string,
+): Promise<DigitalEmployeeMutationResult> {
+  assertSafeDigitalEmployeeId(agentUuid)
+  const file = path.join(dshHome, 'profiles', 'web', 'cordis.patch.yml')
+  return withWebProfileLock(file, async () => {
+    const entries = profileEntries(await readOptional(file), file)
+    const { current, config } = ownedPluginConfig(entries)
+    const employees = parseDigitalEmployees(config.digitalEmployees)
+    const remaining = employees.filter((employee) => employee.agentUuid !== agentUuid)
+    if (remaining.length === employees.length) {
+      return { status: 'not_found', restartRequired: false, agentUuid }
+    }
+    config.digitalEmployees = remaining
+    await writeWebProfile(file, entries, current, config)
+    return { status: 'removed', restartRequired: true, agentUuid }
+  })
+}
+
+export async function updateDigitalEmployeeAccess(
+  dshHome: string,
+  agentUuid: string,
+  access: DigitalEmployeeAccess,
+): Promise<string> {
+  assertSafeDigitalEmployeeId(agentUuid)
+  const allowedDirectSenders = digitalEmployeeStringList(access.allowedDirectSenders, 'allowed_direct_senders')
+  const allowedGroups = digitalEmployeeStringList(access.allowedGroups, 'allowed_groups')
+  if (access.sessionScope !== 'chat' && access.sessionScope !== 'chat-sender') throw new Error('invalid_session_scope')
+  const file = path.join(dshHome, 'profiles', 'web', 'cordis.patch.yml')
+  return withWebProfileLock(file, async () => {
+    const entries = profileEntries(await readOptional(file), file)
+    const { current, config } = ownedPluginConfig(entries)
+    const employees = parseDigitalEmployees(config.digitalEmployees)
+    const employee = employees.find((item) => item.agentUuid === agentUuid)
+    if (!employee) throw new Error('digital_employee_not_found')
+    Object.assign(employee, { ...access, allowedDirectSenders, allowedGroups })
+    config.digitalEmployees = employees
+    await writeWebProfile(file, entries, current, config)
+    return file
+  })
+}
+
 function upsertOwnedAccount(
   config: Record<string, unknown>,
   id: string,
@@ -613,6 +856,7 @@ export async function loadWebProfileConfig(dshHome: string): Promise<WebProfileC
       groupAllowlist: [],
       sessionScope: 'chat',
       accounts: [],
+      digitalEmployees: [],
     }
   }
   const parsed = parse(source, { uniqueKeys: true })
@@ -669,6 +913,7 @@ export async function loadWebProfileConfig(dshHome: string): Promise<WebProfileC
         return [account]
       })
     : []
+  const digitalEmployees = parseDigitalEmployees(config.digitalEmployees)
   return {
     dwsEnabled: tools.enabled === true,
     imageMode,
@@ -681,6 +926,7 @@ export async function loadWebProfileConfig(dshHome: string): Promise<WebProfileC
     groupAllowlist,
     sessionScope: config.sessionScope === 'chat-sender' ? 'chat-sender' : 'chat',
     accounts,
+    digitalEmployees,
   }
 }
 
@@ -700,4 +946,22 @@ export function enabledWebProfileAccounts(profile: WebProfileConfig): WebProfile
       sessionScope: profile.sessionScope,
     },
   ]
+}
+
+/**
+ * 诊断/setup 在数字员工与旧版单机器人并存时仍保留根级机器人兼容读取；
+ * 纯数字员工且没有旧凭据时不虚构一个失败机器人。
+ */
+export async function enabledConfiguredWebProfileAccounts(
+  dshHome: string,
+  profile: WebProfileConfig,
+): Promise<WebProfileAccount[]> {
+  const accounts = enabledWebProfileAccounts(profile)
+  if (profile.accounts.length || !profile.digitalEmployees.some((employee) => employee.enabled)) return accounts
+  try {
+    return (await loadDingTalkAccountCredentials(dshHome, DEFAULT_ACCOUNT_ID, accounts[0])) ? accounts : []
+  } catch {
+    // 凭据文件异常也必须保留默认账号，让 doctor 输出稳定的脱敏错误。
+    return accounts
+  }
 }

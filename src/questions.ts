@@ -19,7 +19,7 @@ import type {
   HostUserQuestionRequest,
   SessionId,
 } from './host.js'
-import type { Outbound } from './outbound.js'
+import type { ReplySink } from './reply-sink.js'
 import type { InteractionCardCallback, InteractionCardRequest, InteractionCardSender } from './interaction-card.js'
 export type { InteractionCardCallback, InteractionCardRequest, InteractionCardSender } from './interaction-card.js'
 import type { InboundMessage } from './stream.js'
@@ -55,7 +55,7 @@ interface Route {
   conversationId: string
   conversationType: InboundMessage['conversationType']
   senderStaffId: string
-  sessionWebhook: string
+  replyContext: InboundMessage
 }
 
 interface PendingQuestion {
@@ -79,7 +79,7 @@ interface PendingApproval {
 
 /** One callback emitted by DingTalk's interactive-card Stream topic. */
 export interface QuestionManagerOptions {
-  outbound: Pick<Outbound, 'sendMarkdown'>
+  outbound: Pick<ReplySink, 'sendMarkdown'>
   markdownTitle: string
   timeoutMs: number
   approvalTimeoutMs?: number
@@ -235,7 +235,7 @@ export class QuestionManager {
       conversationId: msg.conversationId,
       conversationType: msg.conversationType,
       senderStaffId: msg.senderStaffId,
-      sessionWebhook: msg.sessionWebhook,
+      replyContext: msg,
     })
   }
 
@@ -276,7 +276,7 @@ export class QuestionManager {
     if (approval) {
       const route = this.routes.get(approval.sessionId)
       if (route) {
-        this.routes.set(approval.sessionId, { ...route, sessionWebhook: msg.sessionWebhook })
+        this.routes.set(approval.sessionId, { ...route, replyContext: msg })
       }
       const answer = normalized(msg.text)
       const code = normalized(approval.confirmationCode)
@@ -293,7 +293,7 @@ export class QuestionManager {
         return true
       }
       void this.opts.outbound.sendMarkdown(
-        msg.sessionWebhook,
+        msg,
         this.opts.markdownTitle,
         `审批仍在等待：请回复 \`确认 ${approval.confirmationCode}\` 或 \`拒绝 ${approval.confirmationCode}\`。`,
       )
@@ -404,7 +404,7 @@ export class QuestionManager {
     const approvalUserId = this.opts.approvalUserId?.() || route.senderStaffId
     if (route.conversationType === 'direct' && approvalUserId !== route.senderStaffId) {
       await this.opts.outbound.sendMarkdown(
-        route.sessionWebhook,
+        route.replyContext,
         this.opts.markdownTitle,
         '敏感操作只能由机器人管理员批准。当前是其他成员私聊，操作已拒绝；请让管理员在自己的私聊或已允许的群聊中发起。',
       )
@@ -447,7 +447,7 @@ export class QuestionManager {
         pending.cleanup()
         resolve('unavailable')
         void this.opts.outbound.sendMarkdown(
-          (this.routes.get(agent.id) ?? route).sessionWebhook,
+          (this.routes.get(agent.id) ?? route).replyContext,
           this.opts.markdownTitle,
           '敏感操作审批已超时，操作已拒绝。',
         )
@@ -480,7 +480,7 @@ export class QuestionManager {
         this.opts.interactionCards.create({
           outTrackId,
           kind: 'approval',
-          target: cardTarget(route),
+          target: cardTarget(route.replyContext),
           title: `批准 ${request.toolName}？`,
           detail: request.reason ?? `DSH 请求执行敏感工具：${request.toolName}`,
           approveLabel: '允许一次',
@@ -498,7 +498,7 @@ export class QuestionManager {
     const detail = request.reason?.trim() || `DSH 请求执行敏感工具：${request.toolName}`
     const attempt = await raceDelivery(
       this.opts.outbound.sendMarkdown(
-        route.sessionWebhook,
+        route.replyContext,
         this.opts.markdownTitle,
         [
           '### 审批敏感操作',
@@ -579,7 +579,7 @@ export class QuestionManager {
         this.opts.log(`ask_user_question timed out for session ${agent.id}`)
         const latest = this.routes.get(agent.id) ?? route
         void this.opts.outbound.sendMarkdown(
-          latest.sessionWebhook,
+          latest.replyContext,
           this.opts.markdownTitle,
           '等待回答已超时，本次问题已取消。',
         )
@@ -600,7 +600,7 @@ export class QuestionManager {
         delivered = await this.opts.interactionCards.create({
           outTrackId: cardId,
           kind: planApprove ? 'plan-review' : 'question',
-          target: cardTarget(route),
+          target: cardTarget(route.replyContext),
           title: question.header?.trim() || (planApprove ? 'Plan Review' : '请选择'),
           detail: question.detail?.trim() || question.question,
           approveLabel,
@@ -609,7 +609,7 @@ export class QuestionManager {
       }
       if (!delivered) {
         delivered = await this.opts.outbound.sendMarkdown(
-          route.sessionWebhook,
+          route.replyContext,
           this.opts.markdownTitle,
           renderQuestion(question, index, total),
         )

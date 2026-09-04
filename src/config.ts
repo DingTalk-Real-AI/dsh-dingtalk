@@ -1,6 +1,6 @@
 /** Plugin configuration schema (schemastery-validated, editable from DSH config layers). */
 import Schema from '@deepseek-ai/schemastery'
-import type { GroupAccess, ImageMode, SenderAccess } from './setup-state.js'
+import type { DigitalEmployeeConfig, GroupAccess, ImageMode, SenderAccess } from './setup-state.js'
 
 export type ReplyMode = 'aicard' | 'markdown' | 'text'
 
@@ -21,6 +21,7 @@ export interface AccountConfig {
 
 export interface Config {
   accounts: AccountConfig[]
+  digitalEmployees: DigitalEmployeeConfig[]
   clientId: string
   clientSecret: string
   workspace: string
@@ -69,10 +70,25 @@ const AccountConfigSchema: Schema<AccountConfig> = Schema.object({
   sessionScope: Schema.union(['chat', 'chat-sender']).description('该机器人的群聊会话隔离粒度'),
 })
 
+const DigitalEmployeeConfigSchema: Schema<DigitalEmployeeConfig> = Schema.object({
+  agentUuid: Schema.string().required().description('DWS 返回的稳定数字员工 UUID'),
+  name: Schema.string().description('数字员工展示名'),
+  enabled: Schema.boolean().default(true).description('是否启动该数字员工 Channel'),
+  dwsProfile: Schema.string().required().description('精确的 DWS corpId:userId Profile selector'),
+  operatorOpenDingTalkId: Schema.string().required().description('唯一 operator 的 OpenDingTalkId'),
+  allowedDirectSenders: Schema.array(Schema.string()).default([]).description('允许私聊的 OpenDingTalkId'),
+  allowedGroups: Schema.array(Schema.string()).default([]).description('允许群聊的 openConversationId'),
+  sessionScope: Schema.union(['chat', 'chat-sender']).default('chat').description('群聊会话隔离粒度'),
+  protocolVersion: Schema.union([1]).default(1).description('DWS/DSH 数字员工协议版本；首期固定为 1'),
+})
+
 export const Config: Schema<Config> = Schema.object({
   accounts: Schema.array(AccountConfigSchema)
     .default([])
     .description('多机器人列表；为空时兼容读取下方旧版单机器人配置'),
+  digitalEmployees: Schema.array(DigitalEmployeeConfigSchema)
+    .default([])
+    .description('数字员工 Channel；为空时不要求安装 DWS，也不改变机器人行为'),
   clientId: Schema.string().default('').description('钉钉应用 clientId（AppKey）；留空则读环境变量 DINGTALK_CLIENT_ID'),
   clientSecret: Schema.string()
     .role('secret')

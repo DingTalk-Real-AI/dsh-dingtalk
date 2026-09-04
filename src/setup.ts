@@ -2,12 +2,14 @@ import path from 'node:path'
 
 import { accountStateDir, assertAccountId, DEFAULT_ACCOUNT_ID } from './accounts.js'
 import { collectDiagnostics } from './diagnostics.js'
+import { collectDoctorReport } from './doctor-report.js'
 import { diagnoseCommandFailure, formatInstallFailure } from './install-diagnostics.js'
 import { isSupportedNodeVersion } from './node-version.js'
 import { syncWebProfileNpmRegistry } from './npm-registry.js'
 import { beginRegistration, renderQr, waitForCredentials } from './onboard.js'
 import { issueBindingChallenge, OwnerBinding } from './owner.js'
 import {
+  enabledConfiguredWebProfileAccounts,
   enabledWebProfileAccounts,
   loadDingTalkCredentials,
   loadDingTalkAccountCredentials,
@@ -18,8 +20,10 @@ import {
   upsertWebProfileAccount,
   updateWebProfileAccountAccess,
   updateWebProfileConfig,
+  updateDigitalEmployeeAccess,
   type CredentialDocumentLayout,
   type DingTalkCredentials,
+  type DigitalEmployeeConfig,
   type GroupAccess,
   type ImageMode,
   type SenderAccess,
@@ -99,7 +103,7 @@ export interface PrivateAccountSetupResult {
   challengeExpiresAt?: number
 }
 
-type SetupAction = 'full' | 'add-account' | 'credentials' | 'features' | 'binding' | 'doctor'
+type SetupAction = 'full' | 'add-account' | 'credentials' | 'features' | 'binding' | 'digital-employees' | 'doctor'
 
 function cleanVersion(output: string): string {
   const trimmed = output.trim()
@@ -594,11 +598,81 @@ async function chooseRobot(
   )
 }
 
+function parseIdentityList(value: string): string[] {
+  return [
+    ...new Set(
+      value
+        .split(/[\s,，]+/u)
+        .map((item) => item.trim())
+        .filter(Boolean),
+    ),
+  ]
+}
+
+async function configureDigitalEmployeeAccess(
+  ui: SetupUi,
+  dshHome: string,
+  employees: DigitalEmployeeConfig[],
+): Promise<void> {
+  if (!employees.length) throw new Error('当前没有已接入的数字员工；请先通过 DWS connect --channel dsh 接入')
+  const agentUuid =
+    employees.length === 1
+      ? employees[0].agentUuid
+      : await ui.select(
+          'digitalEmployee',
+          '请选择要管理白名单的数字员工',
+          employees.map((employee) => ({
+            value: employee.agentUuid,
+            label: `${employee.name || employee.agentUuid}（${employee.dwsProfile}）`,
+          })),
+          employees[0].agentUuid,
+        )
+  const employee = employees.find((item) => item.agentUuid === agentUuid)
+  if (!employee) throw new Error('digital_employee_not_found')
+  const operatorConfirmed = await ui.confirm(
+    'confirmDigitalEmployeeOperator',
+    `确认 operator OpenDingTalkId 为 ${employee.operatorOpenDingTalkId}？敏感操作只接受该身份私聊确认。`,
+    true,
+  )
+  if (!operatorConfirmed) throw new Error('operator_confirmation_required')
+  const allowedDirectSenders = parseIdentityList(
+    await ui.optionalText(
+      'digitalEmployeeDirectAllowlist',
+      '允许私聊的 OpenDingTalkId（逗号分隔；留空表示只有 operator）',
+      employee.allowedDirectSenders.join(','),
+    ),
+  )
+  const allowedGroups = parseIdentityList(
+    await ui.optionalText(
+      'digitalEmployeeGroupAllowlist',
+      '允许群聊的 openConversationId（逗号分隔；留空表示拒绝所有群）',
+      employee.allowedGroups.join(','),
+    ),
+  )
+  const sessionScope = await ui.select(
+    'digitalEmployeeSessionScope',
+    '群聊会话隔离粒度',
+    [
+      { value: 'chat', label: '每个群一个 Session' },
+      { value: 'chat-sender', label: '群内每个发送者独立 Session' },
+    ],
+    employee.sessionScope,
+  )
+  await updateDigitalEmployeeAccess(dshHome, employee.agentUuid, {
+    allowedDirectSenders,
+    allowedGroups,
+    sessionScope,
+  })
+  ui.success(
+    `数字员工 ${employee.name || employee.agentUuid} 白名单已更新：私聊 ${allowedDirectSenders.length} 人，群聊 ${allowedGroups.length} 个。`,
+  )
+}
+
 async function showOfflineDoctor(options: RunGuidedSetupOptions): Promise<void> {
   const profile = await loadWebProfileConfig(options.dshHome)
-  const accounts = enabledWebProfileAccounts(profile)
-  if (!accounts.length) {
-    options.ui.note('WARN 钉钉机器人：profile 中没有启用的钉钉机器人')
+  const accounts = await enabledConfiguredWebProfileAccounts(options.dshHome, profile)
+  if (!accounts.length && !profile.digitalEmployees.some((employee) => employee.enabled)) {
+    options.ui.note('WARN 钉钉 Channel：profile 中没有启用的机器人或数字员工')
     return
   }
   for (const account of accounts) {
@@ -612,6 +686,17 @@ async function showOfflineDoctor(options: RunGuidedSetupOptions): Promise<void> 
     })
     if (accounts.length > 1) options.ui.note(`[${account.id}]`)
     for (const check of checks) options.ui.note(`${check.status.toUpperCase()} ${check.title}：${check.detail}`)
+  }
+  if (profile.digitalEmployees.some((employee) => employee.enabled)) {
+    const report = await collectDoctorReport({
+      mode: 'offline',
+      dshHome: options.dshHome,
+      stateDir: options.stateDir,
+    })
+    for (const employee of report.digitalEmployees) {
+      options.ui.note(`[数字员工 ${employee.agentUuid}] ${employee.dwsProfile}`)
+      for (const check of employee.checks) options.ui.note(`${check.status.toUpperCase()} ${check.message}`)
+    }
   }
 }
 
@@ -665,21 +750,30 @@ export async function runGuidedSetup(options: RunGuidedSetupOptions): Promise<Gu
   const robots = profile.accounts
   const robotIds = robots.map((robot) => robot.id)
   const hasExistingRobot = robotIds.length > 0
-  const action: SetupAction = hasExistingRobot
-    ? await ui.select(
-        'setupAction',
-        '请选择要执行的配置操作',
-        [
-          { value: 'full', label: '重新执行完整引导' },
-          { value: 'add-account', label: '新增钉钉机器人' },
-          { value: 'credentials', label: '修改现有机器人凭据' },
-          { value: 'features', label: '修改 DWS、图片与访问范围' },
-          { value: 'binding', label: '查看或重新生成机器人管理员绑定口令' },
-          { value: 'doctor', label: '运行只读诊断' },
-        ],
-        'features',
-      )
-    : 'full'
+  const hasDigitalEmployees = profile.digitalEmployees.length > 0
+  const action: SetupAction =
+    hasExistingRobot || hasDigitalEmployees
+      ? await ui.select(
+          'setupAction',
+          '请选择要执行的配置操作',
+          [
+            { value: 'full', label: '重新执行完整机器人引导' },
+            { value: 'add-account', label: '新增钉钉机器人' },
+            ...(hasExistingRobot
+              ? ([
+                  { value: 'credentials', label: '修改现有机器人凭据' },
+                  { value: 'features', label: '修改 DWS、图片与访问范围' },
+                  { value: 'binding', label: '查看或重新生成机器人管理员绑定口令' },
+                ] as const)
+              : []),
+            ...(hasDigitalEmployees
+              ? ([{ value: 'digital-employees', label: '管理数字员工 operator 与白名单' }] as const)
+              : []),
+            { value: 'doctor', label: '运行只读诊断' },
+          ],
+          hasExistingRobot ? 'features' : 'digital-employees',
+        )
+      : 'full'
 
   if (action === 'doctor') {
     await showOfflineDoctor(options)
@@ -705,6 +799,8 @@ export async function runGuidedSetup(options: RunGuidedSetupOptions): Promise<Gu
     await configureCredentials(options, selectedRobot)
   } else if (action === 'features') {
     selectedRobot = await chooseRobot(ui, stateDir, robots, '请选择要修改访问范围的钉钉机器人')
+  } else if (action === 'digital-employees') {
+    await configureDigitalEmployeeAccess(ui, dshHome, profile.digitalEmployees)
   }
   if (action === 'full' || action === 'features') {
     await configureFeatures(options, selectedRobot, !hasExistingRobot)
@@ -723,7 +819,8 @@ export async function runGuidedSetup(options: RunGuidedSetupOptions): Promise<Gu
     const selected = robots.find((robot) => robot.id === selectedRobot)
     if (selected && configureBinding(ui, stateDir, selected, true)) bindingPrepared.add(selectedRobot)
   }
-  const enabledRobots = enabledWebProfileAccounts(await loadWebProfileConfig(dshHome))
+  const refreshedProfile = await loadWebProfileConfig(dshHome)
+  const enabledRobots = refreshedProfile.accounts.length ? enabledWebProfileAccounts(refreshedProfile) : []
   const unboundRobots = enabledRobots.filter((robot) => !isRobotBound(stateDir, robot))
   for (const robot of unboundRobots) {
     if (bindingPrepared.has(robot.id)) continue

@@ -7,10 +7,10 @@ import { existsSync, statSync } from 'node:fs'
 import type { HostAgentRegistry } from './host.js'
 import { sessionId } from './host.js'
 import type { InboundMessage } from './stream.js'
-import type { Outbound } from './outbound.js'
 import type { Bindings } from './bridge.js'
 import type { JsonStore } from './jsonstore.js'
 import type { Queue } from './queue.js'
+import type { ReplySink } from './reply-sink.js'
 
 export interface ModelOverride {
   provider: string
@@ -19,7 +19,7 @@ export interface ModelOverride {
 
 export interface CommandDeps {
   agents: HostAgentRegistry
-  outbound: Outbound
+  outbound: Pick<ReplySink, 'sendMarkdown'>
   bindings: Bindings
   modelOverrides: JsonStore<ModelOverride>
   queue: Queue
@@ -107,7 +107,7 @@ export class Commands {
     this.pendingBusyChoice.delete(conversationId)
     const msg = pending.ctx.queuedMsg
     const reply = async (t: string): Promise<void> => {
-      await this.deps.outbound.sendMarkdown(msg.sessionWebhook, this.deps.markdownTitle, t)
+      await this.deps.outbound.sendMarkdown(msg, this.deps.markdownTitle, t)
     }
     if (pending.ctx.started()) {
       await reply('ℹ️ 前面的任务已经完成，你排队的那条正在处理中——无需打断或并入。')
@@ -126,7 +126,7 @@ export class Commands {
     const key = scopeKey ?? msg.conversationId
     const text = msg.text.trim()
     const reply = async (t: string): Promise<void> => {
-      await this.deps.outbound.sendMarkdown(msg.sessionWebhook, this.deps.markdownTitle, t)
+      await this.deps.outbound.sendMarkdown(msg, this.deps.markdownTitle, t)
     }
 
     // Queue-busy numeric choice (valid for 5 minutes after the notice).

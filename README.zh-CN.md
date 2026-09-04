@@ -6,6 +6,14 @@
 
 需要 Node.js `^22.19.0 || >=24.0.0`。机器人只在本机 `dsh web` 运行且网络在线时工作；电脑休眠、断网或进程退出后不会在云端继续执行。
 
+## 数字员工 Channel（文本 MVP）
+
+数字员工是与机器人平级的新 Channel：机器人仍可在不安装 DWS 的环境中工作；只有启用数字员工时才要求兼容 DWS companion runtime。DWS 负责 connect、授权码交换和 Profile 凭据，DSH 负责本地白名单、事件进程、Session、Queue、Agent、文本回复和诊断，DSH 不保存 Token、AuthCode 或 Client Secret。
+
+接入必须由 DWS `dingtalk-tag connect --channel dsh` 发起，并通过 stdin 幂等调用本包的 `digital-employee register`。注册后重新运行 `setup` 管理 operator、私聊 OpenDingTalkId 和群 openConversationId 白名单。`doctor` 会按员工显示能力、ready、订阅、最近事件/回复/审计和脱敏失败码。
+
+本分支已按 DWS 的 `dingtalk-tag channel capabilities/reply/operator-private`、统一 JSON envelope、真实 snake_case Event Consume 和本地必需审计协议对齐；仍须固定 DWS/DSH/DEAP 精确 SHA 做真实组织联合验收。缺少任一能力或本地审计不可写时该员工 fail-closed，不影响机器人或其他员工。详细接口和验收边界见 [数字员工 Channel 文档](docs/digital-employees.md)。业务 ack/replay/cursor 未完成前，本能力不承诺 exactly-once 或不丢消息。
+
 ## AI Native 安装（推荐）
 
 AI 可以读取安装计划、执行经过批准的非秘密步骤，并从 checkpoint 续跑；扫码链接、Client Secret 和 `/bind` 明文不会进入机器 JSON 或 checkpoint，而是交给你亲自操作的独立终端。
@@ -205,6 +213,10 @@ npx @dingtalk-real-ai/dsh-dingtalk@<version> doctor --json
 # 不发起网络请求
 npx @dingtalk-real-ai/dsh-dingtalk@<version> doctor --offline
 npx @dingtalk-real-ai/dsh-dingtalk@<version> doctor --offline --json
+
+# 仅供 DWS connect 通过 stdin 调用；不要手工传递 Token/AuthCode
+dsh-dingtalk digital-employee register --stdin --json
+dsh-dingtalk digital-employee unregister --agent-uuid <uuid> --json --yes
 ```
 
 `npx` 不会创建可长期使用的 `dsh-dingtalk` 命令。若希望使用该短命令，可执行一次可选的全局安装：

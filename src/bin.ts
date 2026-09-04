@@ -27,9 +27,11 @@ import {
 import { runGuidedSetup } from './setup.js'
 import {
   CredentialDshUpgradeRequiredError,
-  enabledWebProfileAccounts,
+  enabledConfiguredWebProfileAccounts,
   loadDingTalkAccountCredentials,
   loadWebProfileConfig,
+  registerDigitalEmployee,
+  unregisterDigitalEmployee,
 } from './setup-state.js'
 import { SystemRunner } from './system-runner.js'
 
@@ -61,6 +63,10 @@ function usage(): void {
       '                                      人工处理私密步骤，或机器续跑',
       '  dsh-dingtalk doctor [--offline] [--json]',
       '                                      执行只读诊断',
+      '  dsh-dingtalk digital-employee register --stdin --json',
+      '                                      从 DWS 幂等注册数字员工',
+      '  dsh-dingtalk digital-employee unregister --agent-uuid <uuid> --json --yes',
+      '                                      注销一个数字员工',
       '  dsh-dingtalk --version             显示版本',
       '',
       `首次安装推荐：npx ${packageName}@latest setup`,
@@ -95,6 +101,57 @@ function writeJson(value: unknown): void {
 
 function writeJsonError(code: string): void {
   writeJson({ schemaVersion: 1, kind: 'error', error: { code } })
+}
+
+async function readBoundedStdin(maxBytes = 64 * 1024): Promise<string> {
+  const chunks: Buffer[] = []
+  let bytes = 0
+  for await (const chunk of stdin) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+    bytes += buffer.length
+    if (bytes > maxBytes) throw new CliArgumentError('input_too_large')
+    chunks.push(buffer)
+  }
+  return Buffer.concat(chunks).toString('utf8')
+}
+
+async function digitalEmployee(args: string[]): Promise<number> {
+  const [subcommand, ...input] = args
+  const remaining = [...input]
+  try {
+    if (subcommand === 'register') {
+      const fromStdin = takeFlag(remaining, '--stdin')
+      const json = takeFlag(remaining, '--json')
+      if (!fromStdin || !json || remaining.length) throw new CliArgumentError('invalid_arguments')
+      let registration: unknown
+      try {
+        registration = JSON.parse(await readBoundedStdin())
+      } catch (error) {
+        throw new CliArgumentError(error instanceof CliArgumentError ? error.message : 'invalid_json')
+      }
+      const result = await registerDigitalEmployee(dshHome(), registration)
+      writeJson({ schemaVersion: 1, kind: 'digital_employee_registration', ...result })
+      return 0
+    }
+    if (subcommand === 'unregister') {
+      const agentUuid = takeValue(remaining, '--agent-uuid')
+      const json = takeFlag(remaining, '--json')
+      const yes = takeFlag(remaining, '--yes')
+      if (!agentUuid || !json || remaining.length) throw new CliArgumentError('invalid_arguments')
+      if (!yes) {
+        writeJsonError('confirmation_required')
+        return 2
+      }
+      const result = await unregisterDigitalEmployee(dshHome(), agentUuid)
+      writeJson({ schemaVersion: 1, kind: 'digital_employee_unregistration', ...result })
+      return result.status === 'not_found' ? 1 : 0
+    }
+    throw new CliArgumentError('invalid_arguments')
+  } catch (error) {
+    const code = error instanceof Error ? error.message : 'digital_employee_failed'
+    writeJsonError(code)
+    return error instanceof CliArgumentError || /^(invalid|unsupported|duplicate|sensitive|unknown)_/.test(code) ? 2 : 1
+  }
 }
 
 function machineOptions(): MachineSetupOptions {
@@ -142,9 +199,9 @@ async function doctor(args: string[]): Promise<number> {
 
   const profile = await loadWebProfileConfig(dshHome())
   const icons = { pass: '✅', warn: '⚠️', fail: '❌' } as const
-  const accounts = enabledWebProfileAccounts(profile)
-  if (!accounts.length) {
-    console.log('⚠️ 钉钉机器人：profile 中没有启用的钉钉机器人')
+  const accounts = await enabledConfiguredWebProfileAccounts(dshHome(), profile)
+  if (!accounts.length && !profile.digitalEmployees.some((employee) => employee.enabled)) {
+    console.log('⚠️ 钉钉机器人：profile 中没有启用的钉钉机器人；数字员工 Channel 也未启用')
     return 1
   }
   let failed = false
@@ -164,6 +221,22 @@ async function doctor(args: string[]): Promise<number> {
     if (accounts.length > 1) console.log(`\n[${account.id}]`)
     for (const check of checks) console.log(`${icons[check.status]} ${check.title}：${check.detail}`)
     if (checks.some((check) => check.status === 'fail')) failed = true
+  }
+  if (profile.digitalEmployees.some((employee) => employee.enabled)) {
+    const report = await collectDoctorReport({
+      mode: offline ? 'offline' : 'online',
+      dshHome: dshHome(),
+      stateDir: stateDir(),
+    })
+    for (const employee of report.digitalEmployees) {
+      console.log(`\n[数字员工 ${employee.agentUuid}]`)
+      console.log(`ℹ️ DWS Profile：${employee.dwsProfile}；协议版本：${employee.protocolVersion}`)
+      for (const check of employee.checks) {
+        const icon = check.status === 'pass' ? '✅' : check.status === 'fail' || check.status === 'error' ? '❌' : '⚠️'
+        console.log(`${icon} ${check.message}`)
+      }
+      if (employee.result === 'fail' || employee.result === 'error') failed = true
+    }
   }
   return failed ? 1 : 0
 }
@@ -303,6 +376,7 @@ async function main(): Promise<void> {
   const [command, ...args] = process.argv.slice(2)
   if (command === 'setup') process.exitCode = await setup(args)
   else if (command === 'doctor') process.exitCode = await doctor(args)
+  else if (command === 'digital-employee') process.exitCode = await digitalEmployee(args)
   else if (command === '--version' || command === '-V') console.log(packageVersion)
   else {
     usage()

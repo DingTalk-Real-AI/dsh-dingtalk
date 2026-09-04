@@ -11,6 +11,8 @@ import { credentialLayoutForDshVersion, runGuidedSetup } from '../lib/setup.js'
 import {
   saveDingTalkAccountCredentials,
   saveDingTalkCredentials,
+  registerDigitalEmployee,
+  loadWebProfileConfig,
   upsertWebProfileAccount,
   updateWebProfileConfig,
 } from '../lib/setup-state.js'
@@ -774,4 +776,83 @@ test('setup 自动升级不兼容的旧 pnpm 后再安装插件', async (t) => {
   const upgradeIndex = runner.calls.findIndex((call) => call.join(' ') === 'npm install --global pnpm@latest')
   const pluginIndex = runner.calls.findIndex((call) => call[0] === 'dsh' && call[1] === 'plugin')
   assert.ok(upgradeIndex >= 0 && pluginIndex > upgradeIndex)
+})
+
+test('仅配置数字员工时 setup 不要求机器人凭据并可管理 operator 与白名单', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-dingtalk-de-setup-'))
+  t.after(() => import('node:fs/promises').then((fs) => fs.rm(root, { recursive: true, force: true })))
+  const dshHome = path.join(root, '.dsh')
+  await registerDigitalEmployee(dshHome, {
+    schemaVersion: 1,
+    agentUuid: 'employee-setup-1',
+    name: '运营助手',
+    dwsProfile: 'corp-setup:user-setup',
+    operatorOpenDingTalkId: 'operator-open-id',
+    protocolVersion: 1,
+  })
+  const ui = new FakeUi({
+    setupAction: 'digital-employees',
+    confirmDigitalEmployeeOperator: true,
+    digitalEmployeeDirectAllowlist: 'direct-a, direct-b',
+    digitalEmployeeGroupAllowlist: 'group-a，group-b',
+    digitalEmployeeSessionScope: 'chat-sender',
+    startWeb: false,
+  })
+
+  const result = await runGuidedSetup({
+    ui,
+    runner: new FakeRunner(),
+    dshHome,
+    stateDir: path.join(root, '.dsh-dingtalk'),
+    installSpec: '@dingtalk-real-ai/dsh-dingtalk@0.5.0',
+  })
+
+  assert.equal(result.code, 0)
+  assert.equal(ui.prompted.includes('clientId'), false)
+  assert.deepEqual((await loadWebProfileConfig(dshHome)).digitalEmployees[0], {
+    agentUuid: 'employee-setup-1',
+    name: '运营助手',
+    enabled: true,
+    dwsProfile: 'corp-setup:user-setup',
+    operatorOpenDingTalkId: 'operator-open-id',
+    allowedDirectSenders: ['direct-a', 'direct-b'],
+    allowedGroups: ['group-a', 'group-b'],
+    sessionScope: 'chat-sender',
+    protocolVersion: 1,
+  })
+  assert.doesNotMatch(ui.messages.join('\n'), /\/bind/)
+})
+
+test('setup 只能确认 connect 写入的 operator，拒绝后不允许本地改写', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-dingtalk-de-operator-'))
+  t.after(() => import('node:fs/promises').then((fs) => fs.rm(root, { recursive: true, force: true })))
+  const dshHome = path.join(root, '.dsh')
+  await registerDigitalEmployee(dshHome, {
+    schemaVersion: 1,
+    agentUuid: 'employee-operator-1',
+    name: '运营助手',
+    dwsProfile: 'corp-operator:user-operator',
+    operatorOpenDingTalkId: 'operator-from-connect',
+    protocolVersion: 1,
+  })
+  const ui = new FakeUi({
+    setupAction: 'digital-employees',
+    confirmDigitalEmployeeOperator: false,
+    digitalEmployeeOperator: 'local-forged-operator',
+  })
+
+  await assert.rejects(
+    runGuidedSetup({
+      ui,
+      runner: new FakeRunner(),
+      dshHome,
+      stateDir: path.join(root, '.dsh-dingtalk'),
+      installSpec: '@dingtalk-real-ai/dsh-dingtalk@0.5.0',
+    }),
+    /operator_confirmation_required/,
+  )
+  assert.equal(
+    (await loadWebProfileConfig(dshHome)).digitalEmployees[0].operatorOpenDingTalkId,
+    'operator-from-connect',
+  )
 })
