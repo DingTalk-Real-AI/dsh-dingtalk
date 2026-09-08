@@ -156,7 +156,7 @@ test('unregister 只移除目标数字员工并保持其他插件配置', async 
   )
 })
 
-test('CLI 通过 stdin 注册并用显式 yes 注销数字员工', async (t) => {
+test('CLI 通过 stdin 注册；注销必须确认且不能越过失联宿主删除配置', async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-dingtalk-de-cli-'))
   const dshHome = path.join(root, '.dsh')
   t.after(() => rm(root, { recursive: true, force: true }))
@@ -190,9 +190,8 @@ test('CLI 通过 stdin 注册并用显式 yes 注销数字员工', async (t) => 
     ['lib/bin.js', 'digital-employee', 'unregister', '--agent-uuid', registration.agentUuid, '--json', '--yes'],
     { cwd: path.resolve('.'), encoding: 'utf8', env },
   )
-  assert.equal(removed.status, 0, removed.stderr)
-  assert.equal(JSON.parse(removed.stdout).status, 'removed')
+  assert.equal(removed.status, 1, removed.stderr)
 
   const profile = parse(await readFile(path.join(dshHome, 'profiles', 'web', 'cordis.patch.yml'), 'utf8'))
-  assert.deepEqual(profile[0].config.digitalEmployees, [])
+  assert.equal(profile[0].config.digitalEmployees[0].agentUuid, registration.agentUuid)
 })

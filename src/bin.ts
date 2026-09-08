@@ -119,6 +119,14 @@ async function digitalEmployee(args: string[]): Promise<number> {
   const [subcommand, ...input] = args
   const remaining = [...input]
   try {
+    if (subcommand === 'runtime') {
+      if (!takeFlag(remaining, '--stdin') || !takeFlag(remaining, '--json') || remaining.length)
+        throw new CliArgumentError('invalid_arguments')
+      const { requestEmployeeControl } = await import('./digital-employee-control.js')
+      const result = await requestEmployeeControl(JSON.parse(await readBoundedStdin()))
+      writeJson({ schemaVersion: 1, kind: 'digital_employee_runtime', ...(result as object) })
+      return 0
+    }
     if (subcommand === 'register') {
       const fromStdin = takeFlag(remaining, '--stdin')
       const json = takeFlag(remaining, '--json')
@@ -142,7 +150,21 @@ async function digitalEmployee(args: string[]): Promise<number> {
         writeJsonError('confirmation_required')
         return 2
       }
-      const result = await unregisterDigitalEmployee(dshHome(), agentUuid)
+      const profile = await loadWebProfileConfig(dshHome())
+      const employee = profile.digitalEmployees.find((item) => item.agentUuid === agentUuid)
+      if (employee) {
+        const { requestEmployeeControl } = await import('./digital-employee-control.js')
+        await requestEmployeeControl({
+          protocolVersion: 1,
+          action: 'release',
+          agentUuid,
+          dwsProfile: employee.dwsProfile,
+          bindingRevision: employee.bindingRevision ?? 0,
+        })
+      }
+      const result = employee
+        ? { status: 'removed', restartRequired: false, agentUuid }
+        : await unregisterDigitalEmployee(dshHome(), agentUuid)
       writeJson({ schemaVersion: 1, kind: 'digital_employee_unregistration', ...result })
       return result.status === 'not_found' ? 1 : 0
     }

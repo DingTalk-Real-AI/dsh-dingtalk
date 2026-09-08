@@ -3,6 +3,35 @@ import test from 'node:test'
 
 import { Queue } from '../lib/queue.js'
 
+test('employee queue close rejects new work and drain awaits the active task', async () => {
+  const q = new Queue(() => {})
+  let release,
+    ran = 0
+  q.run('a', async () => {
+    ran++
+    await new Promise((r) => {
+      release = r
+    })
+  })
+  await new Promise((r) => setImmediate(r))
+  q.run('a', async () => {
+    ran++
+  })
+  q.close()
+  q.run('b', async () => {
+    ran++
+  })
+  let drained = false
+  const done = q.drain().then(() => {
+    drained = true
+  })
+  await new Promise((r) => setImmediate(r))
+  assert.equal(drained, false)
+  release()
+  await done
+  assert.equal(ran, 1)
+})
+
 test('clear 丢弃尚未开始的旧消息，运行中的任务自行取消后释放 lane', async () => {
   const queue = new Queue(() => {})
   let release

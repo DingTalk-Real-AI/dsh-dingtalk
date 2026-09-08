@@ -78,7 +78,14 @@ async function createFakeDws(root, pathCommand = false) {
 const fs = require('node:fs')
 const record = process.env.FAKE_DWS_RECORD
 const args = process.argv.slice(2)
-const operation = args.includes('capabilities') ? 'capabilities' : args.includes('reply') ? 'reply' : args.includes('operator-private') ? 'operator-private' : args.includes('consume') ? 'consume' : 'unknown'
+if (args.includes('--local-lease')) {
+  process.stderr.write('[employee] leased\\n')
+  process.stdin.resume()
+  process.stdin.on('end', () => process.exit(0))
+  process.on('SIGTERM', () => process.exit(0))
+  return
+}
+const operation = args.includes('binding') ? 'binding' : args.includes('capabilities') ? 'capabilities' : args.includes('reply') ? 'reply' : args.includes('operator-private') ? 'operator-private' : args.includes('consume') ? 'consume' : 'unknown'
 fs.appendFileSync(record, JSON.stringify({ operation, args, credentialEnvKeys: Object.keys(process.env).filter((key) => /TOKEN|AUTH_?CODE|CLIENT_?SECRET|PASSWORD|CREDENTIAL/i.test(key)) }) + '\\n')
 if (operation === 'capabilities') {
   process.stdout.write(JSON.stringify({ ok: true, outcome: 'success', data: { schemaVersion: 1, protocolVersion: 1, auditMode: 'local_required', capabilities: { eventConsume: true, replyStdin: true, operatorPrivateStdin: true } }, meta: {} }))
@@ -111,6 +118,10 @@ if (operation === 'consume') {
   process.stdin.on('data', (chunk) => { input += chunk })
   process.stdin.on('end', () => {
     const value = input ? JSON.parse(input) : {}
+    if (operation === 'binding') {
+      process.stdout.write(JSON.stringify({ ok: true, outcome: 'success', data: { agentUuid: value.agentUuid, dwsProfile: args[args.indexOf('--profile') + 1], bindingRevision: value.bindingRevision, channel: 'dsh', bindingState: 'bound', desiredState: 'running' } }))
+      return
+    }
     const openMessageId = process.env.FAKE_DWS_EMPTY_RECEIPT === '1' ? '' : operation === 'reply' ? 'outgoing-1' : 'operator-message-1'
     process.stdout.write(JSON.stringify({ ok: true, outcome: 'success', data: { openMessageId, conversationId: value.conversationId || 'operator-conversation', deliveryStatus: 'delivered', idempotencyKey: value.idempotencyKey }, meta: {} }))
   })
@@ -216,7 +227,7 @@ function createHost() {
   const followups = []
   const sessions = []
   const emit = (name, ...args) => {
-    for (const handler of handlers.get(name) ?? []) handler(...args)
+    return Promise.all((handlers.get(name) ?? []).map((handler) => handler(...args)))
   }
   const ctx = {
     credentials: { resolve: async () => undefined },
@@ -655,7 +666,7 @@ test(
     process.env.DSH_DINGTALK_STATE_DIR = stateDir
     const hosts = []
     t.after(async () => {
-      for (const host of hosts) host.dispose()
+      for (const host of hosts) await host.dispose()
       await new Promise((resolve) => setTimeout(resolve, 20))
       if (originalPath === undefined) delete process.env.PATH
       else process.env.PATH = originalPath
@@ -687,7 +698,7 @@ test(
     assert.equal(new Set(first.followups.map((item) => item.sessionId)).size, 2)
     assert.ok(first.followups.every((item) => item.message.content[0].text === '只应通过 stdin 回复的正文'))
 
-    first.dispose()
+    await first.dispose()
     await new Promise((resolve) => setTimeout(resolve, 50))
     const beforeRestart = (await readFile(recordFile, 'utf8'))
       .split('\n')

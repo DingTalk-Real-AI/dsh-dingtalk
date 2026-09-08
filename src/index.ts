@@ -34,13 +34,21 @@ import { downloadImageByCode } from './media.js'
 import { modelAcceptsImages } from './image-mode.js'
 import { exactPackageSpec } from './package-info.js'
 import { resolveStateDir } from './paths.js'
+import { EmployeeRuntimeRegistry, type EmployeeRuntime } from './digital-employee-lifecycle.js'
+import { serveEmployeeControl } from './digital-employee-control.js'
+import { EmployeeLease } from './digital-employee-lease.js'
 import { cardTarget } from './targets.js'
 import { DwsDigitalEmployeeSource, type DigitalEmployeeInbound } from './digital-employee-runtime.js'
 import { DigitalEmployeeApprovalManager, DigitalEmployeeTextRenderer } from './digital-employee-renderer.js'
 import { routeDigitalEmployeePreTask } from './digital-employee-routing.js'
 import { BotReplySink } from './reply-sink.js'
 import { RobotStreamSource } from './inbound-source.js'
-import { validateDigitalEmployeeConfigs, type DigitalEmployeeConfig } from './setup-state.js'
+import {
+  validateDigitalEmployeeConfigs,
+  loadWebProfileConfig,
+  unregisterDigitalEmployee,
+  type DigitalEmployeeConfig,
+} from './setup-state.js'
 import type {
   HostAgentContext,
   HostAgentPresets,
@@ -77,13 +85,51 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   const digitalEmployees = validateDigitalEmployeeConfigs(config.digitalEmployees ?? []).filter(
     (employee) => employee.enabled,
   )
-  if (!resolution.accounts.length && !digitalEmployees.length) {
-    log('no configured DingTalk robots could start')
-    return
-  }
 
   const cwd = config.workspace || path.join(os.homedir(), 'dsh-dingtalk-workspace')
   fs.mkdirSync(cwd, { recursive: true })
+  const employees = new EmployeeRuntimeRegistry((employee) => startDigitalEmployee(ctx, config, employee, cwd))
+  let controlReady = false
+  try {
+    const control = await serveEmployeeControl(async (request) => {
+      if (request.action === 'prepare') {
+        if (!(ctx as any).agentDefaultModel.currentSelection()) throw new Error('executor_not_ready')
+        return { ...request, prepared: true }
+      }
+      if (request.action === 'status') return employees.status(request)
+      if (request.action === 'stop' || request.action === 'release') {
+        const result = await employees.stop(request)
+        if (request.action === 'release')
+          await unregisterDigitalEmployee(
+            process.env.DSH_HOME || path.join(os.homedir(), '.dsh'),
+            request.agentUuid,
+            request,
+          )
+        return result
+      }
+      const latest = await loadWebProfileConfig(process.env.DSH_HOME || path.join(os.homedir(), '.dsh'))
+      const employee = latest.digitalEmployees.find((item) => item.agentUuid === request.agentUuid)
+      if (
+        !employee ||
+        !employee.enabled ||
+        employee.dwsProfile !== request.dwsProfile ||
+        (employee.bindingRevision ?? 0) !== request.bindingRevision
+      )
+        throw new Error('binding_mismatch')
+      return employees.start(employee)
+    })
+    controlReady = true
+    ;(ctx as any).on('dispose', async () => {
+      try {
+        await employees.close()
+      } finally {
+        await control.close()
+      }
+    })
+  } catch {
+    // 不能取得本宿主控制权时，不启动任何员工；机器人仍独立运行。
+    log('digital employee control unavailable; employees blocked, robots unaffected')
+  }
   const primary = resolution.accounts[0]
   const dwsTools = primary
     ? new DwsTools({
@@ -104,9 +150,9 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
         log(`robot ${account.id}: failed to start (${error instanceof Error ? error.message : error})`)
       }
     }),
-    ...digitalEmployees.map(async (employee) => {
+    ...(controlReady ? digitalEmployees : []).map(async (employee) => {
       try {
-        await startDigitalEmployee(ctx, config, employee, cwd)
+        await employees.start(employee)
       } catch (error) {
         log(
           `digital employee ${employee.agentUuid}: failed to start (${error instanceof Error ? error.message : error})`,
@@ -121,7 +167,7 @@ async function startDigitalEmployee(
   config: Config,
   employee: DigitalEmployeeConfig,
   cwd: string,
-): Promise<void> {
+): Promise<EmployeeRuntime> {
   const log = (line: string) =>
     console.log(`[dsh-dingtalk:de:${employee.agentUuid} ${new Date().toTimeString().slice(0, 8)}] ${line}`)
   const stateDir = path.join(resolveStateDir(), 'digital-employees', employee.agentUuid)
@@ -153,47 +199,56 @@ async function startDigitalEmployee(
   let renderer!: DigitalEmployeeTextRenderer
   let approvals!: DigitalEmployeeApprovalManager
   let commands!: Commands
+  let stopping = false
+  const callbacks = new Set<Promise<unknown>>()
 
   const runtime = new DwsDigitalEmployeeSource({
     employee,
     stateDir,
     log,
-    onMessage: async (input) => {
-      commandReplyEvents.set(input.message.msgId, input.event)
-      try {
-        if (await routeDigitalEmployeePreTask(input, commands, approvals)) return
-      } finally {
-        commandReplyEvents.delete(input.message.msgId)
-      }
-      eventsByMessageId.set(input.message.msgId, input.event)
-      renderer.accept(input)
-      return queue.run(input.scopeKey, async () => {
-        try {
-          const sessionId = await bridge.process(input.message, input.scopeKey)
-          await replySink.audit({
-            eventId: input.event.eventId,
-            sessionId,
-            operationType: 'task_end',
-            status: 'completed',
-          })
-        } catch (error) {
-          eventsByMessageId.delete(input.message.msgId)
-          renderer.discard(input.message.msgId)
-          log(`task failed (${error instanceof Error ? error.message : 'unknown'})`)
-          try {
-            await replySink.audit({
-              eventId: input.event.eventId,
-              sessionId: bindings.get(input.scopeKey),
-              operationType: 'task_end',
-              status: 'failed',
-            })
-          } catch {
-            // 审计自身不可用时保持 fail-closed；不创建第二次模型任务或回复重试。
-          }
-        }
-      })
+    onMessage: (input) => {
+      if (stopping) return
+      const task = handleMessage(input)
+      callbacks.add(task)
+      void task.finally(() => callbacks.delete(task)).catch(() => undefined)
+      return task
     },
   })
+  async function handleMessage(input: DigitalEmployeeInbound) {
+    commandReplyEvents.set(input.message.msgId, input.event)
+    try {
+      if (await routeDigitalEmployeePreTask(input, commands, approvals)) return
+    } finally {
+      commandReplyEvents.delete(input.message.msgId)
+    }
+    eventsByMessageId.set(input.message.msgId, input.event)
+    renderer.accept(input)
+    return queue.run(input.scopeKey, async () => {
+      try {
+        const sessionId = await bridge.process(input.message, input.scopeKey)
+        await replySink.audit({
+          eventId: input.event.eventId,
+          sessionId,
+          operationType: 'task_end',
+          status: 'completed',
+        })
+      } catch (error) {
+        eventsByMessageId.delete(input.message.msgId)
+        renderer.discard(input.message.msgId)
+        log(`task failed (${error instanceof Error ? error.message : 'unknown'})`)
+        try {
+          await replySink.audit({
+            eventId: input.event.eventId,
+            sessionId: bindings.get(input.scopeKey),
+            operationType: 'task_end',
+            status: 'failed',
+          })
+        } catch {
+          // 审计自身不可用时保持 fail-closed；不创建第二次模型任务或回复重试。
+        }
+      }
+    })
+  }
   const replySink = runtime.replySink
   renderer = new DigitalEmployeeTextRenderer(replySink, log)
   approvals = new DigitalEmployeeApprovalManager(
@@ -253,6 +308,7 @@ async function startDigitalEmployee(
     log,
   })
   bridge = new Bridge(agents, renderer, bindings, {
+    exclusiveOwnership: true,
     cwd,
     log,
     modelOverrides,
@@ -290,12 +346,46 @@ async function startDigitalEmployee(
       }
     },
   })
-  ;(ctx as any).on('session/event', (session: HostSession, event: HostSessionEvent) => {
+  const detach = (ctx as any).on('session/event', (session: HostSession, event: HostSessionEvent) => {
     renderer.onSessionEvent(session, event)
   })
-  ;(ctx as any).on('dispose', () => runtime.stop())
-  await runtime.start()
-  log(`channel up: profile=${employee.dwsProfile} protocol=1 text-only`)
+  let stopPromise: Promise<void> | undefined
+  const lease = new EmployeeLease(employee, () => {
+    void ownedRuntime.stop().catch(() => log('employee lease lost; release unconfirmed'))
+  })
+  const ownedRuntime: EmployeeRuntime = {
+    start: async () => {
+      try {
+        if (stopping || !currentDefault()) throw new Error('executor_not_ready')
+        await replySink.verifyBinding()
+        if (stopping) throw new Error('employee_stopping')
+        await lease.start()
+        if (stopping) throw new Error('employee_stopping')
+        await runtime.start()
+        log(`channel up: profile=${employee.dwsProfile} protocol=1 text-only`)
+      } catch (error) {
+        await ownedRuntime.stop()
+        throw error
+      }
+    },
+    status: () => (lease.lost ? { state: 'failed' } : runtime.currentStatus()),
+    stop: () =>
+      (stopPromise ??= (async () => {
+        stopping = true
+        queue.close()
+        approvals.close()
+        const sourceStopped = runtime.stop()
+        // dispose 的确认只覆盖本 Bridge 创建/恢复的 Agent，不触碰其他宿主实例。
+        renderer.releaseOwned(await bridge.close())
+        await sourceStopped
+        await queue.drain()
+        await Promise.allSettled([...callbacks])
+        await replySink.drain()
+        if (typeof detach === 'function') detach()
+        await lease.stop()
+      })()),
+  }
+  return ownedRuntime
 }
 
 async function startAccount(

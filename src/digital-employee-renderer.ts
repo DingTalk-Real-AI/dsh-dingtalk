@@ -40,6 +40,15 @@ export class DigitalEmployeeTextRenderer {
     this.pendingEvents.delete(messageId)
   }
 
+  releaseOwned(sessionIds: string[]): void {
+    for (const id of sessionIds) {
+      const state = this.states.get(id)
+      this.states.delete(id)
+      state?.settle()
+    }
+    this.pendingEvents.clear()
+  }
+
   onInbound(sessionId: string, msg: InboundMessage): Promise<void> {
     const event = this.pendingEvents.get(msg.msgId)
     this.pendingEvents.delete(msg.msgId)
@@ -122,6 +131,24 @@ export class DigitalEmployeeApprovalManager {
   private readonly approvals = new Map<string, ApprovalState>()
   private readonly questions = new Map<string, QuestionState>()
   private questionSequence = 0
+  private closed = false
+  private disposers: (() => void)[] = []
+
+  close(): void {
+    this.closed = true
+    for (const pending of this.approvals.values()) {
+      clearTimeout(pending.timer)
+      pending.resolve('rejected')
+    }
+    for (const pending of this.questions.values()) {
+      clearTimeout(pending.timer)
+      pending.resolve({ answers: [] })
+    }
+    this.approvals.clear()
+    this.questions.clear()
+    this.sessionEvents.clear()
+    for (const dispose of this.disposers.splice(0)) dispose()
+  }
 
   constructor(
     private readonly runtime: DigitalEmployeeControlSink,
@@ -131,11 +158,13 @@ export class DigitalEmployeeApprovalManager {
   ) {}
 
   bindSession(sessionId: string, event: DigitalEmployeeEvent): void {
+    if (this.closed) return
     this.sessionEvents.set(sessionId, event)
   }
 
   install(ctx: HostAgentContext): void {
-    ctx.on('user-questions/request', async (request, next) => {
+    const questionOff = ctx.on('user-questions/request', async (request, next) => {
+      if (this.closed) return { answers: [] }
       const agent = request.agent ?? ctx.agent
       const event = agent ? this.sessionEvents.get(agent.id) : undefined
       if (!agent || !event || !request.questions.length) return next()
@@ -167,9 +196,11 @@ export class DigitalEmployeeApprovalManager {
       }
       return answer
     })
-    ctx.on(
+    if (typeof questionOff === 'function') this.disposers.push(questionOff)
+    const approvalOff = ctx.on(
       'approval/request',
       async (request, next) => {
+        if (this.closed) return 'rejected'
         const event = this.sessionEvents.get(request.agent.id)
         if (!event) return next()
         const code = randomBytes(4).toString('hex').slice(0, 6).toUpperCase()
@@ -223,6 +254,7 @@ export class DigitalEmployeeApprovalManager {
       },
       { prepend: true },
     )
+    if (typeof approvalOff === 'function') this.disposers.push(approvalOff)
   }
 
   async handleInbound(input: DigitalEmployeeInbound): Promise<boolean> {

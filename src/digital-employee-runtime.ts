@@ -161,6 +161,7 @@ export class DwsDigitalEmployeeSource implements InboundSource {
     const child = this.child
     this.child = undefined
     if (child) await this.terminateChild(child)
+    await this.eventChain
     this.updateStatus({ state: 'stopped' })
   }
 
@@ -315,6 +316,7 @@ export class DwsDigitalEmployeeSource implements InboundSource {
   }
 
   private async handleEvent(event: DigitalEmployeeEvent): Promise<void> {
+    if (this.stopped) return
     if (this.ledger.hasEvent(event.eventId) || this.ledger.hasSentMessage(event.messageId)) return
     const allowed = authorizeDigitalEmployeeEvent(this.options.employee, event)
     if (!allowed) {
@@ -326,6 +328,7 @@ export class DwsDigitalEmployeeSource implements InboundSource {
     await this.replySink.audit({ eventId: event.eventId, operationType: 'access_check', status: 'accepted' })
     await this.replySink.waitForPendingReplies(event.conversationId)
     if (this.ledger.hasEvent(event.eventId) || this.ledger.hasSentMessage(event.messageId)) return
+    if (this.stopped) return
     if (this.status.state === 'failed') throw new Error('digital_employee_fail_closed')
     this.ledger.markEvent(event.eventId)
     this.updateStatus({ state: 'ready', lastEventAt: Date.now() })

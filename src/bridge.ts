@@ -5,7 +5,7 @@
  * serializes on that completion). Rendering lives in renderer.ts.
  */
 import { randomUUID } from 'node:crypto'
-import type { HostAgent, HostAgentContext, HostAgentRegistry, ImageBlock, TextBlock } from './host.js'
+import type { AgentHandle, HostAgent, HostAgentContext, HostAgentRegistry, ImageBlock, TextBlock } from './host.js'
 import { sessionId } from './host.js'
 import type { InboundMessage } from './stream.js'
 import type { JsonStore } from './jsonstore.js'
@@ -19,6 +19,8 @@ export interface TurnRenderer {
 }
 
 export interface BridgeOptions {
+  /** 数字员工不借用 Web UI 或其他 Channel 持有的运行实例。 */
+  exclusiveOwnership?: boolean
   cwd: string
   log(line: string): void
   /** Per-conversation model override store (set via /model use). */
@@ -36,6 +38,22 @@ export interface BridgeOptions {
 }
 
 export class Bridge {
+  private closed = false
+  private readonly owned = new Map<string, AgentHandle>()
+
+  async close(): Promise<string[]> {
+    this.closed = true
+    const handles = [...this.owned.values()]
+    await Promise.all(
+      handles.map(async (handle) => {
+        handle.agent.cancel({ kind: 'user' })
+        await handle.dispose()
+        this.owned.delete(handle.agent.id)
+      }),
+    )
+    return handles.map((handle) => handle.agent.id)
+  }
+
   constructor(
     private readonly agents: HostAgentRegistry,
     private readonly renderer: TurnRenderer,
@@ -45,8 +63,10 @@ export class Bridge {
 
   /** Drive one message through its agent; resolves when the turn settles. */
   async process(msg: InboundMessage, scopeKey: string): Promise<string> {
+    if (this.closed) throw new Error('employee_stopping')
     const agent = await this.agentFor(scopeKey)
     await this.opts.onAgentMessage(agent, msg)
+    if (this.closed) throw new Error('employee_stopping')
     const settled = this.renderer.onInbound(agent.id, msg)
     const content: Array<TextBlock | ImageBlock> = []
     const parts = msg.contentParts?.length
@@ -85,7 +105,11 @@ export class Bridge {
     const bound = this.bindings.get(conversationId)
     if (bound) {
       const running = this.agents.get(sessionId(bound))
-      if (running) return running
+      if (running) {
+        if (this.opts.exclusiveOwnership && this.owned.get(running.id)?.agent !== running)
+          throw new Error('session_owned_by_another_runtime')
+        return running
+      }
       try {
         const handle = await this.agents.resume({
           resumeSessionId: sessionId(bound),
@@ -93,7 +117,7 @@ export class Bridge {
           setup: composition.setup,
         })
         this.opts.log(`resumed session ${bound} for conversation ${conversationId}`)
-        return handle.agent
+        return this.own(handle)
       } catch (err) {
         this.opts.log(`resume ${bound} failed (${err instanceof Error ? err.message : err}); creating fresh`)
       }
@@ -112,6 +136,15 @@ export class Bridge {
     this.opts.log(
       `created session ${id} for conversation ${conversationId} (preset=${composition.agentPreset ?? 'none'})`,
     )
+    return this.own(handle)
+  }
+
+  private async own(handle: AgentHandle): Promise<HostAgent> {
+    if (this.closed) {
+      await handle.dispose()
+      throw new Error('employee_stopping')
+    }
+    this.owned.set(handle.agent.id, handle)
     return handle.agent
   }
 }
