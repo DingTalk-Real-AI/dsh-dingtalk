@@ -64,6 +64,7 @@ function usage(): void {
       '  dsh-dingtalk doctor [--offline] [--json]',
       '                                      执行只读诊断',
       '  dsh-dingtalk digital-employee register --stdin --json',
+      '  dsh-dingtalk digital-employee runtime --stdin --json',
       '                                      从 DWS 幂等注册数字员工',
       '  dsh-dingtalk digital-employee unregister --agent-uuid <uuid> --json --yes',
       '                                      注销一个数字员工',

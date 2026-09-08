@@ -10,6 +10,7 @@ export class EmployeeLease {
   lost = false
   constructor(
     private readonly employee: EmployeeIdentity,
+    private readonly runtimeInstanceId: string,
     private readonly onLost: () => void,
   ) {}
 
@@ -28,6 +29,8 @@ export class EmployeeLease {
         '--local-lease',
         '--binding-revision',
         String(this.employee.bindingRevision ?? 0),
+        '--runtime-instance-id',
+        this.runtimeInstanceId,
         '--yes',
         '--format',
         'json',
@@ -82,7 +85,8 @@ export class EmployeeLease {
     const child = this.child
     if (!child || this.closed || child.exitCode !== null || child.signalCode !== null) return
     const done = new Promise<void>((resolve) => child.once('close', () => resolve()))
-    child.stdin.end()
+    // 只有宿主已完成全部释放才发送确认；EOF 或进程崩溃本身不是释放证明。
+    child.stdin.end('released\n')
     await done
   }
 }

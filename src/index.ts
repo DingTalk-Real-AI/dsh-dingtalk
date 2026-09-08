@@ -88,7 +88,9 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
 
   const cwd = config.workspace || path.join(os.homedir(), 'dsh-dingtalk-workspace')
   fs.mkdirSync(cwd, { recursive: true })
-  const employees = new EmployeeRuntimeRegistry((employee) => startDigitalEmployee(ctx, config, employee, cwd))
+  const employees = new EmployeeRuntimeRegistry((employee, instanceId) =>
+    startDigitalEmployee(ctx, config, employee, cwd, instanceId),
+  )
   let controlReady = false
   try {
     const control = await serveEmployeeControl(async (request) => {
@@ -167,6 +169,7 @@ async function startDigitalEmployee(
   config: Config,
   employee: DigitalEmployeeConfig,
   cwd: string,
+  runtimeInstanceId: string,
 ): Promise<EmployeeRuntime> {
   const log = (line: string) =>
     console.log(`[dsh-dingtalk:de:${employee.agentUuid} ${new Date().toTimeString().slice(0, 8)}] ${line}`)
@@ -350,7 +353,7 @@ async function startDigitalEmployee(
     renderer.onSessionEvent(session, event)
   })
   let stopPromise: Promise<void> | undefined
-  const lease = new EmployeeLease(employee, () => {
+  const lease = new EmployeeLease(employee, runtimeInstanceId, () => {
     void ownedRuntime.stop().catch(() => log('employee lease lost; release unconfirmed'))
   })
   const ownedRuntime: EmployeeRuntime = {

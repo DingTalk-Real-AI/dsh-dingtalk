@@ -20,6 +20,7 @@ interface Entry {
   runtimeInstanceId: string
   state: RuntimeState
   runtime?: EmployeeRuntime
+  creating?: Promise<EmployeeRuntime>
   stopping?: Promise<void>
 }
 
@@ -27,19 +28,26 @@ interface Entry {
 export class EmployeeRuntimeRegistry {
   private readonly entries = new Map<string, Entry>()
   private closing = false
-  constructor(private readonly create: (employee: DigitalEmployeeConfig) => Promise<EmployeeRuntime>) {}
+  constructor(
+    private readonly create: (employee: DigitalEmployeeConfig, runtimeInstanceId: string) => Promise<EmployeeRuntime>,
+  ) {}
 
   status(identity: EmployeeIdentity) {
     const entry = this.match(identity)
-    const transportReady = entry?.state === 'running' && entry.runtime?.status().state === 'ready'
+    const observed = entry?.runtime?.status().state
+    const runtimeState =
+      entry?.state === 'running' && (observed === 'failed' || observed === 'stopped')
+        ? 'blocked'
+        : (entry?.state ?? 'stopped')
+    const transportReady = runtimeState === 'running' && observed === 'ready'
     return {
       protocolVersion: 1,
       ...identity,
       bindingRevision: identity.bindingRevision ?? 0,
       runtimeInstanceId: entry?.runtimeInstanceId ?? '',
-      runtimeState: entry?.state ?? 'stopped',
+      runtimeState,
       transportReady: Boolean(transportReady),
-      executorReady: entry?.state === 'running',
+      executorReady: runtimeState === 'running',
       released: !entry || entry.state === 'stopped',
       observedAt: new Date().toISOString(),
     }
@@ -60,8 +68,10 @@ export class EmployeeRuntimeRegistry {
     }
     const entry: Entry = { identity: employee, runtimeInstanceId: randomUUID(), state: 'starting' }
     this.entries.set(employee.agentUuid, entry)
+    entry.creating = Promise.resolve().then(() => this.create(employee, entry.runtimeInstanceId))
     try {
-      entry.runtime = await this.create(employee)
+      entry.runtime = await entry.creating
+      if (this.closing || entry.state !== 'starting') throw new Error('runtime_start_interrupted')
       await entry.runtime.start?.()
       if (entry.state !== 'starting') throw new Error('runtime_start_interrupted')
       entry.state = 'running'
@@ -69,7 +79,8 @@ export class EmployeeRuntimeRegistry {
     } catch (error) {
       // 工厂必须自行清理失败启动；无法证明释放时保留阻塞，不能覆盖实例。
       try {
-        await entry.runtime?.stop()
+        if (entry.stopping) await entry.stopping
+        else await entry.runtime?.stop()
         entry.state = entry.runtime ? 'stopped' : 'blocked'
       } catch {
         entry.state = 'blocked'
@@ -81,11 +92,15 @@ export class EmployeeRuntimeRegistry {
   async stop(identity: EmployeeIdentity) {
     const entry = this.match(identity)
     if (!entry || entry.state === 'stopped') return this.status(identity)
-    if (!entry.runtime) throw new Error('runtime_not_released')
     if (!entry.stopping) {
       entry.state = 'stopping'
-      entry.stopping = entry.runtime
-        .stop()
+      entry.stopping = Promise.resolve()
+        .then(async () => {
+          const runtime = entry.runtime ?? (await entry.creating)
+          if (!runtime) throw new Error('runtime_not_released')
+          entry.runtime = runtime
+          await runtime.stop()
+        })
         .then(
           () => {
             entry.state = 'stopped'
@@ -115,6 +130,8 @@ export class EmployeeRuntimeRegistry {
       (entry.identity.dwsProfile !== identity.dwsProfile ||
         (entry.identity.bindingRevision ?? 0) !== (identity.bindingRevision ?? 0))
     ) {
+      // 旧版本已确认释放，不得阻塞新版本补注册；不能把旧实例 ID 当作新版本释放证明。
+      if (entry.state === 'stopped') return undefined
       throw new Error('binding_mismatch')
     }
     return entry

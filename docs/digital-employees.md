@@ -30,6 +30,8 @@ DSH 提供 `digital-employee runtime --stdin --json` 私有机器入口。输入
 
 停止顺序：禁止新任务并丢弃未执行队列 → 取消审批/问题等待 → 停 Consumer → 取消并 dispose 本 Channel 自己创建/恢复的 Agent → 等待回合、事件与所有下行调用结束 → 移除监听 → 最后释放 lease。借用 Web UI 所有的运行实例会被拒绝，不 dispose 其他实例。无法确认释放时保留阻塞状态，不承诺换绑成功。
 
+正常释放由宿主向 lease stdin 写入 `released` 确认。异常 EOF 或 lease 崩溃在 DWS 留下私有隔离标记，新实例即使取得文件锁也不能启动。仅原 `runtimeInstanceId` 的停止确认可以解除隔离；宿主已崩溃而无法取得确认时保持 blocked，不提供自动或强制接管。
+
 release 在上述停止完成后删除目标注册配置；普通 stop 保留配置。DWS 停止期望会在宿主重启时再次校验，旧配置不会绕过新 bindingRevision 复活员工。独立机器人仍不依赖 DWS，不重启整个宿主。
 
 注销必须显式确认：
