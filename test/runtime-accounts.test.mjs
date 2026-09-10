@@ -36,13 +36,19 @@ function config(workspace) {
 }
 
 test('插件公开 apply 边界隔离多账号 Stream，单账号失败不影响其他账号', async (t) => {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-dingtalk-runtime-accounts-'))
-  t.after(() => import('node:fs/promises').then((fs) => fs.rm(root, { recursive: true, force: true })))
+  // 短路径保证 macOS 也真正启动 Unix socket，避免路径上限掩盖宿主清理遗漏。
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-ra-'))
+  const dispose = []
+  const closeHost = async () => {
+    await Promise.all(dispose.splice(0).map((listener) => listener()))
+  }
   const previousStateDir = process.env.DSH_DINGTALK_STATE_DIR
   process.env.DSH_DINGTALK_STATE_DIR = path.join(root, 'state')
-  t.after(() => {
+  t.after(async () => {
+    await closeHost()
     if (previousStateDir === undefined) delete process.env.DSH_DINGTALK_STATE_DIR
     else process.env.DSH_DINGTALK_STATE_DIR = previousStateDir
+    await import('node:fs/promises').then((fs) => fs.rm(root, { recursive: true, force: true }))
   })
 
   const connected = []
@@ -73,7 +79,6 @@ test('插件公开 apply 边界隔离多账号 Stream，单账号失败不影响
   t.after(() => mock.restoreAll())
   const { apply } = await import(`../lib/index.js?runtime-accounts=${Date.now()}`)
 
-  const dispose = []
   const workspace = {
     path: root,
     sessionIds: [],
@@ -101,7 +106,6 @@ test('插件公开 apply 边界隔离多账号 Stream，单账号失败不影响
   await apply(ctx, config(root))
 
   assert.deepEqual(connected, ['healthy'])
-  assert.equal(dispose.length, 1)
-  for (const listener of dispose) listener()
+  await closeHost()
   assert.deepEqual(disconnected, ['healthy'])
 })

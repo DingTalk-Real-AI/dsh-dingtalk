@@ -39,6 +39,34 @@ async function writeFakeDwsCommand(root, name, source, pathCommand = false) {
   return { dwsCommand: process.execPath, dwsArgsPrefix: [script] }
 }
 
+test('已通过信号退出的 Consumer 在启动失败后仍能完成 stop', { skip: process.platform === 'win32' }, async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-signaled-'))
+  const invocation = await writeFakeDwsCommand(
+    root,
+    'signal-exit',
+    "process.stderr.write('retryable=false\\n', () => process.kill(process.pid, 'SIGTERM'))\n",
+  )
+  const runtime = new DwsDigitalEmployeeSource({
+    employee,
+    stateDir: path.join(root, 'state'),
+    ...invocation,
+    log() {},
+    onMessage() {},
+  })
+  runtime.replySink.probe = async () => {}
+  t.after(async () => {
+    await runtime.stop()
+    await rm(root, { recursive: true, force: true })
+  })
+  await assert.rejects(runtime.start(), /event_consumer_exited_before_ready/)
+  const stopped = await Promise.race([
+    runtime.stop().then(() => true),
+    new Promise((resolve) => setTimeout(() => resolve(false), 200)),
+  ])
+  assert.equal(stopped, true, 'close 已发生，stop 不应再次等待同一 close 事件')
+  assert.equal(runtime.currentStatus().state, 'stopped')
+})
+
 test('本地白名单分别覆盖 operator、额外私聊、群白名单和默认拒绝', () => {
   const base = {
     schemaVersion: 1,

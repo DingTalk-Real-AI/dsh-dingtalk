@@ -109,6 +109,20 @@ async function removeStaleSocket(dir: string): Promise<void> {
 }
 
 async function openEmployeeControl(handler: (input: EmployeeControlRequest) => Promise<unknown>, dir: string) {
+  const pending = new Map<string, Promise<unknown>>()
+  // 锁住完整控制事务，包含 start 的配置读取和 release 的配置删除。
+  // 仅按员工串行化，另一个员工的状态与启停不等待本员工。
+  const execute = (request: EmployeeControlRequest): Promise<unknown> => {
+    const previous = pending.get(request.agentUuid) ?? Promise.resolve()
+    const task = previous.catch(() => undefined).then(() => handler(request))
+    pending.set(request.agentUuid, task)
+    void task
+      .finally(() => {
+        if (pending.get(request.agentUuid) === task) pending.delete(request.agentUuid)
+      })
+      .catch(() => undefined)
+    return task
+  }
   const server = net.createServer((socket) => {
     let body = ''
     let handled = false
@@ -126,7 +140,7 @@ async function openEmployeeControl(handler: (input: EmployeeControlRequest) => P
       void (async () => {
         try {
           const request = parseEmployeeControl(JSON.parse(body))
-          const data = await handler(request)
+          const data = await execute(request)
           socket.end(JSON.stringify({ ok: true, data }) + '\n')
         } catch {
           socket.end(JSON.stringify({ ok: false, error: 'employee_control_failed' }) + '\n')

@@ -5,6 +5,61 @@ import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { serveEmployeeControl, requestEmployeeControl, parseEmployeeControl } from '../lib/digital-employee-control.js'
 import { EmployeeRuntimeRegistry } from '../lib/digital-employee-lifecycle.js'
+import os from 'node:os'
+import path from 'node:path'
+
+test(
+  'private IPC serializes release and start through config deletion without blocking another employee',
+  { skip: process.platform === 'win32' },
+  async (t) => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'dsh-race-'))
+    let registered = true
+    const deleting = Promise.withResolvers()
+    const finishDelete = Promise.withResolvers()
+    const registry = new EmployeeRuntimeRegistry(async () => ({
+      status: () => ({ state: 'ready' }),
+      stop: async () => {},
+    }))
+    const a = { protocolVersion: 1, agentUuid: 'a', dwsProfile: 'corp:a', bindingRevision: 1 }
+    const b = { ...a, agentUuid: 'b', dwsProfile: 'corp:b' }
+    await registry.start(a)
+    await registry.start(b)
+    const host = await serveEmployeeControl(async (input) => {
+      if (input.action === 'release') {
+        const stopped = await registry.stop(input)
+        deleting.resolve()
+        await finishDelete.promise
+        registered = false
+        return stopped
+      }
+      if (input.action === 'start') {
+        if (!registered) throw Error('binding_missing')
+        return registry.start(input)
+      }
+      return registry.status(input)
+    }, dir)
+    t.after(async () => {
+      finishDelete.resolve()
+      await registry.close()
+      await host.close()
+      await rm(dir, { recursive: true, force: true })
+    })
+    const releasing = requestEmployeeControl({ ...a, action: 'release' }, dir)
+    await deleting.promise
+    // 提前注册失败处理，断言失败也不留下未处理的 rejection。
+    const starting = requestEmployeeControl({ ...a, action: 'start' }, dir).then(
+      () => 'started',
+      () => 'rejected',
+    )
+    assert.equal((await requestEmployeeControl({ ...b, action: 'status' }, dir)).runtimeState, 'running')
+    finishDelete.resolve()
+    assert.equal((await releasing).released, true)
+    assert.equal(await starting, 'rejected')
+    assert.equal(registered, false)
+    assert.equal(registry.status(a).runtimeState, 'stopped')
+    assert.equal((await requestEmployeeControl({ ...a, action: 'status' }, dir)).released, true)
+  },
+)
 
 test(
   'real CLI stdin and private IPC stop only the target employee and preserve the other runtime',
