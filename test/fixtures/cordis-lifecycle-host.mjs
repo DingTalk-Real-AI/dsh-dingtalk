@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import path from 'node:path'
-import { copyFile, mkdir, chmod, readFile, readdir, writeFile, access } from 'node:fs/promises'
+import { copyFile, mkdir, chmod, readFile, writeFile, access } from 'node:fs/promises'
 import { setTimeout as delay } from 'node:timers/promises'
 import { EventEmitter } from 'node:events'
 import { DWClient } from 'dingtalk-stream'
@@ -99,10 +99,10 @@ try {
   }
   const fiber = root.plugin(plugin, config)
   if (mode === 'slow-control' || mode === 'slow-robot') {
-    await waitFor(async () =>
+    await waitFor(() =>
       mode === 'slow-robot'
         ? robotEntered
-        : (await readdir(process.env.DSH_DINGTALK_STATE_DIR)).filter((name) => name.includes('.owner.')).length === 2,
+        : fiber.getEffects().some((effect) => effect.label === 'digital-employee-control'),
     )
     let disposed = false
     const stopping = root.fiber.dispose().then(() => (disposed = true))

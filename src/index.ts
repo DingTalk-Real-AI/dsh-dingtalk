@@ -130,7 +130,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
           await control.close()
         }
       }
-    })
+    }, 'digital-employee-control')
   } catch {
     // 不能取得本宿主控制权时，不启动任何员工；机器人仍独立运行。
     log('digital employee control unavailable; employees blocked, robots unaffected')
