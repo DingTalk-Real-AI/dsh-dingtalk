@@ -4,6 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test, { mock } from 'node:test'
+import { Context } from '@deepseek-ai/cordis'
 
 let deliveryClock = Date.now()
 
@@ -32,8 +33,12 @@ async function waitUntil(predicate, timeoutMs = 500) {
 }
 
 test('公开 apply 运行时允许管理员通过私聊或同群一次性文字码审批并在超时后拒绝', async (t) => {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-dingtalk-approval-runtime-'))
-  t.after(() => rm(root, { recursive: true, force: true }))
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-approval-'))
+  const lifecycle = new Context()
+  t.after(async () => {
+    await lifecycle.fiber.dispose()
+    await rm(root, { recursive: true, force: true })
+  })
   const previousStateDir = process.env.DSH_DINGTALK_STATE_DIR
   process.env.DSH_DINGTALK_STATE_DIR = path.join(root, 'state')
   t.after(() => {
@@ -78,7 +83,6 @@ test('公开 apply 运行时允许管理员通过私聊或同群一次性文字�
   })
 
   const { apply } = await import(`../lib/index.js?approval-runtime=${Date.now()}`)
-  const dispose = []
   const listeners = new Map()
   let sessionEvent
   let followupCount = 0
@@ -103,6 +107,7 @@ test('公开 apply 运行时允许管理员通过私聊或同群一次性文字�
     cancel() {},
   }
   const ctx = {
+    effect: (...args) => lifecycle.effect(...args),
     credentials: { async resolve() {} },
     agents: {
       get: (id) => (id === agent.id ? agent : undefined),
@@ -125,7 +130,6 @@ test('公开 apply 运行时允许管理员通过私聊或同群一次性文字�
       return undefined
     },
     on(event, listener) {
-      if (event === 'dispose') dispose.push(listener)
       if (event === 'session/event') sessionEvent = listener
     },
   }
@@ -164,7 +168,6 @@ test('公开 apply 运行时允许管理员通过私聊或同群一次性文字�
   }
 
   await apply(ctx, config)
-  t.after(() => dispose.forEach((listener) => listener()))
 
   await robotListener(delivery('start', '开始'))
   await waitUntil(() => typeof listeners.get('approval/request') === 'function' && followupCount === 1)

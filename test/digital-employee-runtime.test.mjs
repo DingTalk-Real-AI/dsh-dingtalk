@@ -3,6 +3,7 @@ import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/pr
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
+import { Context } from '@deepseek-ai/cordis'
 
 import { authorizeDigitalEmployeeEvent, DwsDigitalEmployeeSource } from '../lib/digital-employee-runtime.js'
 import { apply } from '../lib/index.js'
@@ -29,6 +30,8 @@ const employee = {
 
 async function writeFakeDwsCommand(root, name, source, pathCommand = false) {
   if (pathCommand) {
+    // 仓库内 TMPDIR 会继承 ESM；无扩展名的 fake CLI 仍应按 CommonJS 执行。
+    await writeFile(path.join(root, 'package.json'), JSON.stringify({ type: 'commonjs' }))
     const command = path.join(root, name)
     await writeFile(command, source, { mode: 0o755 })
     await chmod(command, 0o755)
@@ -250,6 +253,7 @@ if (args.includes('consume')) {
 }
 
 function createHost() {
+  const lifecycle = new Context()
   const handlers = new Map()
   const agents = new Map()
   const followups = []
@@ -258,6 +262,7 @@ function createHost() {
     return Promise.all((handlers.get(name) ?? []).map((handler) => handler(...args)))
   }
   const ctx = {
+    effect: (...args) => lifecycle.effect(...args),
     credentials: { resolve: async () => undefined },
     agentDefaultModel: { currentSelection: () => ({ provider: 'test', model: 'model' }) },
     agents: {
@@ -314,7 +319,7 @@ function createHost() {
       return () => list.splice(list.indexOf(handler), 1)
     },
   }
-  return { ctx, followups, sessions, dispose: () => emit('dispose') }
+  return { ctx, followups, sessions, dispose: () => lifecycle.fiber.dispose() }
 }
 
 function pluginConfig(workspace, digitalEmployees) {

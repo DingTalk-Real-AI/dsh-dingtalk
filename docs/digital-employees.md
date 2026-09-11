@@ -32,6 +32,8 @@ DSH 提供 `digital-employee runtime --stdin --json` 私有机器入口。输入
 
 正常释放由宿主向 lease stdin 写入 `released` 确认。异常 EOF 或 lease 崩溃在 DWS 留下私有隔离标记，新实例即使取得文件锁也不能启动。仅原 `runtimeInstanceId` 的停止确认可以解除隔离；宿主已崩溃而无法取得确认时保持 blocked，不提供自动或强制接管。
 
+插件通过 Cordis `ctx.effect` 管理控制入口和机器人 Stream 的获取与释放；卸载、重载和宿主正常退出会等待异步清理，包括仍在初始化的资源。不能用普通 `ctx.on('dispose')` 事件代替该生命周期。退出宽限内无法完成释放时仍按异常退出处理；升级插件不会自动清除旧版本遗留的租约隔离标记。
+
 release 在上述停止完成后删除目标注册配置；普通 stop 保留配置。DWS 停止期望会在宿主重启时再次校验，旧配置不会绕过新 bindingRevision 复活员工。独立机器人仍不依赖 DWS，不重启整个宿主。
 
 注销必须显式确认：

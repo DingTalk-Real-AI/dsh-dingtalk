@@ -93,39 +93,42 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   )
   let controlReady = false
   try {
-    const control = await serveEmployeeControl(async (request) => {
-      if (request.action === 'prepare') {
-        if (!(ctx as any).agentDefaultModel.currentSelection()) throw new Error('executor_not_ready')
-        return { ...request, prepared: true }
-      }
-      if (request.action === 'status') return employees.status(request)
-      if (request.action === 'stop' || request.action === 'release') {
-        const result = await employees.stop(request)
-        if (request.action === 'release')
-          await unregisterDigitalEmployee(
-            process.env.DSH_HOME || path.join(os.homedir(), '.dsh'),
-            request.agentUuid,
-            request,
-          )
-        return result
-      }
-      const latest = await loadWebProfileConfig(process.env.DSH_HOME || path.join(os.homedir(), '.dsh'))
-      const employee = latest.digitalEmployees.find((item) => item.agentUuid === request.agentUuid)
-      if (
-        !employee ||
-        !employee.enabled ||
-        employee.dwsProfile !== request.dwsProfile ||
-        (employee.bindingRevision ?? 0) !== request.bindingRevision
-      )
-        throw new Error('binding_mismatch')
-      return employees.start(employee)
-    })
-    controlReady = true
-    ;(ctx as any).on('dispose', async () => {
-      try {
-        await employees.close()
-      } finally {
-        await control.close()
+    await ctx.effect(async () => {
+      const control = await serveEmployeeControl(async (request) => {
+        if (request.action === 'prepare') {
+          if (!(ctx as any).agentDefaultModel.currentSelection()) throw new Error('executor_not_ready')
+          return { ...request, prepared: true }
+        }
+        if (request.action === 'status') return employees.status(request)
+        if (request.action === 'stop' || request.action === 'release') {
+          const result = await employees.stop(request)
+          if (request.action === 'release')
+            await unregisterDigitalEmployee(
+              process.env.DSH_HOME || path.join(os.homedir(), '.dsh'),
+              request.agentUuid,
+              request,
+            )
+          return result
+        }
+        const latest = await loadWebProfileConfig(process.env.DSH_HOME || path.join(os.homedir(), '.dsh'))
+        const employee = latest.digitalEmployees.find((item) => item.agentUuid === request.agentUuid)
+        if (
+          !employee ||
+          !employee.enabled ||
+          employee.dwsProfile !== request.dwsProfile ||
+          (employee.bindingRevision ?? 0) !== request.bindingRevision
+        )
+          throw new Error('binding_mismatch')
+        return employees.start(employee)
+      })
+      controlReady = true
+      // Cordis v4 的 fiber 等待 effect disposer，不会发送普通 dispose 事件。
+      return async () => {
+        try {
+          await employees.close()
+        } finally {
+          await control.close()
+        }
       }
     })
   } catch {
@@ -817,8 +820,15 @@ async function startAccount(
       }
     },
   })
-  await source.start()
-  ;(ctx as any).on('dispose', () => source.stop())
+  await ctx.effect(async () => {
+    try {
+      await source.start()
+    } catch (error) {
+      await source.stop()
+      throw error
+    }
+    return () => source.stop()
+  })
 
   log(
     `channel up: workspace=${cwd} replyMode=${config.replyMode.direct}/${config.replyMode.group} streaming=${config.streaming.enabled} async=${config.asyncMode}`,
