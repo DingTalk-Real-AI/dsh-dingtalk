@@ -46,7 +46,8 @@ export class Bridge {
     const handles = [...this.owned.values()]
     await Promise.all(
       handles.map(async (handle) => {
-        handle.agent.cancel({ kind: 'user' })
+        // 宿主可能已经开始销毁 inbox；只等待所属 handle 的幂等销毁，
+        // 由宿主完成取消、排空和注销，不能再操作失效的 Agent 投影。
         await handle.dispose()
         this.owned.delete(handle.agent.id)
       }),

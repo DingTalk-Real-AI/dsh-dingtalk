@@ -12,7 +12,45 @@ const [dir, mode = 'root'] = process.argv.slice(2)
 process.env.DSH_HOME = path.join(dir, 'home')
 process.env.DSH_DINGTALK_STATE_DIR = path.join(dir, 'state')
 const root = new Context()
-root.provide('agents', {})
+const ownedHandles = []
+const agents = new Map()
+root.provide('agents', {
+  get: (id) => agents.get(id),
+  create: async ({ sessionId, setup }) => {
+    let active = true
+    let disposing
+    const agent = {
+      id: sessionId,
+      ctx: { on: () => () => {} },
+      followup() {
+        root.emit(
+          'session/event',
+          { id: sessionId },
+          {
+            type: 'assistant/message',
+            data: { message: { content: [{ type: 'text', text: 'fixture response' }] } },
+          },
+        )
+        root.emit('session/event', { id: sessionId }, { type: 'turn/end' })
+      },
+      cancel() {
+        if (!active) throw new Error('cannot read inbox state: its projection registration is not active')
+      },
+    }
+    const handle = {
+      agent,
+      dispose: () =>
+        (disposing ??= Promise.resolve().then(() => {
+          active = false
+          agents.delete(sessionId)
+        })),
+    }
+    agents.set(sessionId, agent)
+    ownedHandles.push(handle)
+    await setup?.(agent.ctx)
+    return handle
+  },
+})
 root.provide('agentDefaultModel', { currentSelection: () => ({ provider: 'fixture', model: 'fixture' }) })
 root.provide('credentials', { resolve: async () => undefined })
 root.provide('llm', {})
@@ -61,11 +99,15 @@ let robotEntered = false
 let robotStops = 0
 let code = 0
 try {
-  if (['reload', 'SIGTERM', 'SIGINT'].includes(mode)) {
+  if (['reload', 'SIGTERM', 'SIGINT', 'owned-SIGTERM', 'owned-SIGINT'].includes(mode)) {
     const bin = path.join(dir, 'bin')
     await mkdir(bin)
     await writeFile(path.join(bin, 'package.json'), JSON.stringify({ type: 'commonjs' }))
     await copyFile(new URL('./lifecycle-dws.cjs', import.meta.url), path.join(bin, 'dws'))
+    if (mode.startsWith('owned-')) {
+      const script = await readFile(path.join(bin, 'dws'), 'utf8')
+      await writeFile(path.join(bin, 'dws'), script.replace("content: '/help'", "content: 'fixture model request'"))
+    }
     await chmod(path.join(bin, 'dws'), 0o755)
     process.env.PATH = `${bin}${path.delimiter}${process.env.PATH}`
     config.digitalEmployees = employeeIds.map((id) => ({
@@ -142,10 +184,16 @@ try {
         assert.equal(operations.split('\n').filter((operation) => operation === 'released').length, 1)
       }
     }
-    if (mode.startsWith('SIG')) {
+    if (mode.startsWith('owned-')) {
+      assert.equal(ownedHandles.length, employeeIds.length, '必须真正创建双员工 Agent，不能只测试 /help')
+      // 模拟宿主先销毁 Agent inbox；插件仍需等待幂等 handle.dispose，然后释放租约。
+      await Promise.all(ownedHandles.map((handle) => handle.dispose()))
+    }
+    const signal = mode.replace(/^owned-/, '')
+    if (signal.startsWith('SIG')) {
       await new Promise((resolve, reject) => {
-        process.once(mode, () => root.fiber.dispose().then(resolve, reject))
-        process.kill(process.pid, mode)
+        process.once(signal, () => root.fiber.dispose().then(resolve, reject))
+        process.kill(process.pid, signal)
       })
     } else await root.fiber.dispose()
     if (config.digitalEmployees.length) await assertReleased(mode === 'reload' ? 2 : 1)

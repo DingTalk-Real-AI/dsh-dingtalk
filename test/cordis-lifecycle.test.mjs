@@ -27,6 +27,8 @@ for (const [mode, title] of [
   ['reload', '真实 Cordis 重载等待双员工下行完成并释放租约，再启动无重叠'],
   ['SIGTERM', 'SIGTERM 退出等待双员工严格 released 确认'],
   ['SIGINT', 'SIGINT 退出等待双员工严格 released 确认'],
+  ['owned-SIGTERM', 'SIGTERM 在宿主先销毁双员工 Agent 后仍完成严格租约释放'],
+  ['owned-SIGINT', 'SIGINT 在宿主先销毁双员工 Agent 后仍完成严格租约释放'],
   ['slow-control', '控制入口尚在获取时卸载，不留下新的控制锁'],
   ['slow-robot', '机器人连接尚未完成时卸载，等待连接完成且仅清理一次'],
 ]) {
