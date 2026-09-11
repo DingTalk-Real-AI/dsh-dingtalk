@@ -4,6 +4,7 @@ import { mkdtemp } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test, { mock } from 'node:test'
+import { Context } from '@deepseek-ai/cordis'
 
 function deferred() {
   let resolve
@@ -14,8 +15,12 @@ function deferred() {
 }
 
 test('图片接收在 Auto 模式下覆盖拒绝提示与下载、存储、注入成功链路', async (t) => {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-dingtalk-image-intake-'))
-  t.after(() => import('node:fs/promises').then((fs) => fs.rm(root, { recursive: true, force: true })))
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-image-'))
+  const lifecycle = new Context()
+  t.after(async () => {
+    await lifecycle.fiber.dispose()
+    await import('node:fs/promises').then((fs) => fs.rm(root, { recursive: true, force: true }))
+  })
   const previousStateDir = process.env.DSH_DINGTALK_STATE_DIR
   process.env.DSH_DINGTALK_STATE_DIR = path.join(root, 'state')
   t.after(() => {
@@ -79,7 +84,6 @@ test('图片接收在 Auto 模式下覆盖拒绝提示与下载、存储、注�
   const { apply, inject } = await import(`../lib/index.js?image-intake=${Date.now()}`)
   const runtimeLogs = []
   mock.method(console, 'log', (...args) => runtimeLogs.push(args.join(' ')))
-  const dispose = []
   let sessionEvent
   const workspace = { path: root, sessionIds: [], async attachSession() {} }
   const agentContext = {
@@ -99,6 +103,7 @@ test('图片接收在 Auto 模式下覆盖拒绝提示与下载、存储、注�
     },
   }
   const ctx = {
+    effect: (...args) => lifecycle.effect(...args),
     credentials: { async resolve() {} },
     agents: {
       get: (id) => (id === agent.id ? agent : undefined),
@@ -135,7 +140,6 @@ test('图片接收在 Auto 模式下覆盖拒绝提示与下载、存储、注�
       return undefined
     },
     on(event, listener) {
-      if (event === 'dispose') dispose.push(listener)
       if (event === 'session/event') sessionEvent = listener
     },
   }
@@ -179,7 +183,6 @@ test('图片接收在 Auto 模式下覆盖拒绝提示与下载、存储、注�
   }
 
   await apply(ctx, config)
-  t.after(() => dispose.forEach((listener) => listener()))
 
   let completed = false
   const handling = robotListener({

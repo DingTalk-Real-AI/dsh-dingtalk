@@ -71,6 +71,7 @@ const AccountConfigSchema: Schema<AccountConfig> = Schema.object({
 })
 
 const DigitalEmployeeConfigSchema: Schema<DigitalEmployeeConfig> = Schema.object({
+  bindingRevision: Schema.number().min(0).description('DWS 绑定版本；旧绑定省略为 0'),
   agentUuid: Schema.string().required().description('DWS 返回的稳定数字员工 UUID'),
   name: Schema.string().description('数字员工展示名'),
   enabled: Schema.boolean().default(true).description('是否启动该数字员工 Channel'),
