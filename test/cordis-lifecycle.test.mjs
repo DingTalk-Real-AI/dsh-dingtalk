@@ -31,6 +31,9 @@ for (const [mode, title] of [
   ['owned-SIGINT', 'SIGINT 在宿主先销毁双员工 Agent 后仍完成严格租约释放'],
   ['slow-control', '控制入口尚在获取时卸载，不留下新的控制锁'],
   ['slow-robot', '机器人连接尚未完成时卸载，等待连接完成且仅清理一次'],
+  ['preset-missing', '员工工具预设不存在时明确回复配置错误，不向模型注入消息'],
+  ['preset-mount', '员工工具预设挂载失败时明确回复配置错误，不向模型注入消息'],
+  ['session-conflict', '会话归属冲突向钉钉回复固定错误提示，不静默、不抢占和泄露内部异常'],
 ]) {
   test(title, { skip: process.platform === 'win32' }, (t) => runFixture(t, mode))
 }

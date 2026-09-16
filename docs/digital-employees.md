@@ -112,3 +112,15 @@ DSH 同时排空 stdout/stderr，只有 ready 行匹配 `^\[event\] ready(?:\s|$
 联合验收使用固定 DSH/DWS/DEAP SHA，依次覆盖机器人无 DWS 基线、一次 connect、四类白名单消息、唯一 Session/回复/审计、重启恢复、双员工隔离和故障注入。完整步骤见 [验收清单](acceptance-checklist.md)。
 
 业务 ack/replay/cursor 未完成前只能声明“可用 MVP”，不能承诺 exactly-once 或不丢消息。AI Card、图片、文件、语音、互动卡片审批和无 DWS 运行模式均后置。
+
+# Web 与钉钉共用会话的宿主接入
+
+连接器向宿主提供可选服务 `dingtalkSessionRouter`。Web 的 Agent / Session lookup 应在默认冷恢复前，
+对 `has(sessionId)` 命中的绑定会话调用 `resolve(sessionId)`，并使用返回的同一个 Agent。
+这样预设、审批/问答接线和销毁句柄仍由数字员工连接器持有；Web 查看不能先创建一个连接器无权接管的实例。
+
+- 子 Agent 的既有归属检查应先执行；无关会话保持宿主原有逻辑。
+- 员工停用、重复绑定、归属冲突或恢复失败应返回错误，不可回退到 Web 自行恢复。
+- 连接器合并同一绑定的并发恢复；失败时保留会话 ID 和历史，不自动创建替代会话。
+- 单独升级连接器不足以改变旧宿主 Web lookup；旧版宿主需要兼容接入。当前本地验收使用隔离兼容层，不修改全局安装包。
+- IM 收到归属冲突或处理失败时回复固定中文提示和错误码，不输出内部异常，也不自动重放失败消息。

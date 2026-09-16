@@ -262,6 +262,9 @@ function createHost() {
     return Promise.all((handlers.get(name) ?? []).map((handler) => handler(...args)))
   }
   const ctx = {
+    provide(name, value) {
+      this[name] = value
+    },
     effect: (...args) => lifecycle.effect(...args),
     credentials: { resolve: async () => undefined },
     agentDefaultModel: { currentSelection: () => ({ provider: 'test', model: 'model' }) },
@@ -306,6 +309,7 @@ function createHost() {
       },
     },
     get(name) {
+      if (name === 'agentPresets') return { resolve: async () => ({ id: 'fixture-preset' }), mount: async () => {} }
       if (name !== 'workspaceRegistry') return undefined
       return {
         resolveByPath: async () => ({ path: '/test-workspace', sessionIds: [], attachSession: async () => {} }),

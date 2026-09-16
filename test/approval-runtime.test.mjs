@@ -107,6 +107,9 @@ test('公开 apply 运行时允许管理员通过私聊或同群一次性文字�
     cancel() {},
   }
   const ctx = {
+    provide(name, value) {
+      this[name] = value
+    },
     effect: (...args) => lifecycle.effect(...args),
     credentials: { async resolve() {} },
     agents: {

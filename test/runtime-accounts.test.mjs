@@ -84,6 +84,9 @@ test('插件公开 apply 边界隔离多账号 Stream，单账号失败不影响
     async attachSession() {},
   }
   const ctx = {
+    provide(name, value) {
+      this[name] = value
+    },
     effect: (...args) => lifecycle.effect(...args),
     credentials: { async resolve() {} },
     agents: {},

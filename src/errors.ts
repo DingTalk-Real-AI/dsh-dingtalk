@@ -12,6 +12,22 @@ interface Rule {
 }
 
 const CODE_RULES: Record<string, Omit<Rule, 'pattern'>> = {
+  SESSION_OWNERSHIP_CONFLICT: {
+    label: '会话暂时无法恢复，本轮未提交给模型',
+    hint: '请检查 Web 与钉钉连接器的会话归属；修复后重发，历史记录保留',
+  },
+  CONNECTOR_TASK_FAILED: {
+    label: '连接器处理失败',
+    hint: '请查看 DSH 日志并确认处理结果；不要重复提交敏感操作',
+  },
+  AGENT_PRESET_UNAVAILABLE: {
+    label: '工具预设不可用',
+    hint: '检查当前 DSH_HOME 的工具预设与默认设置；修复后重试',
+  },
+  INVALID_REQUEST: {
+    label: '模型请求参数或协议不兼容',
+    hint: '检查模型 API 协议、消息角色与兼容配置；此错误不表示凭据或额度异常',
+  },
   MISSING_CREDENTIAL: {
     label: '模型凭据未配置',
     hint: '打开 dsh web 的 Models 页面补充对应模型凭据后重试',
@@ -23,7 +39,7 @@ const RULES: Rule[] = [
   { pattern: /timed?.?out|ETIMEDOUT|deadline/i, label: '模型响应超时', hint: '稍后重发即可' },
   { pattern: /429|rate.?limit|qps|too many requests/i, label: '模型限流', hint: '稍等一会再发' },
   {
-    pattern: /401|403|unauthorized|forbidden|invalid.*(key|token)|credential|欠费|quota|insufficient/i,
+    pattern: /\b(?:401|403)\b|unauthorized|forbidden|invalid.*(key|token)|credential|欠费|quota|insufficient/i,
     label: '模型凭据无效或额度不足',
     hint: '检查 dsh web 设置里的模型凭据',
   },

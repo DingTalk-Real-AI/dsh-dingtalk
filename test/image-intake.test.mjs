@@ -103,6 +103,9 @@ test('图片接收在 Auto 模式下覆盖拒绝提示与下载、存储、注�
     },
   }
   const ctx = {
+    provide(name, value) {
+      this[name] = value
+    },
     effect: (...args) => lifecycle.effect(...args),
     credentials: { async resolve() {} },
     agents: {

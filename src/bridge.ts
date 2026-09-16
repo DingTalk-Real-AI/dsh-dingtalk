@@ -14,6 +14,10 @@ import type { ModelOverride } from './commands.js'
 /** conversationId → sessionId, persisted so a restarted host resumes the same session. */
 export type Bindings = JsonStore<string>
 
+export class BridgeSessionError extends Error {
+  readonly code = 'SESSION_OWNERSHIP_CONFLICT'
+}
+
 export interface TurnRenderer {
   onInbound(sessionId: string, msg: InboundMessage): Promise<void>
 }
@@ -40,9 +44,11 @@ export interface BridgeOptions {
 export class Bridge {
   private closed = false
   private readonly owned = new Map<string, AgentHandle>()
+  private readonly resolving = new Map<string, Promise<HostAgent>>()
 
   async close(): Promise<string[]> {
     this.closed = true
+    await Promise.allSettled([...this.resolving.values()])
     const handles = [...this.owned.values()]
     await Promise.all(
       handles.map(async (handle) => {
@@ -96,7 +102,29 @@ export class Bridge {
     return agent.id
   }
 
-  private async agentFor(conversationId: string): Promise<HostAgent> {
+  /** Web 只能恢复已有绑定，不能隐式新建会话或绕开本 Bridge 的生命周期。 */
+  async resolveBoundSession(id: string): Promise<HostAgent | undefined> {
+    const matches = [...this.bindings.entries()].filter(([, value]) => value === id)
+    if (!matches.length) return undefined
+    if (matches.length !== 1) throw new BridgeSessionError('employee_session_ambiguous')
+    return this.agentFor(matches[0][0])
+  }
+
+  private agentFor(conversationId: string): Promise<HostAgent> {
+    if (this.closed) return Promise.reject(new BridgeSessionError('employee_stopping'))
+    const existing = this.resolving.get(conversationId)
+    if (existing) return existing
+    const pending = this.loadAgent(conversationId)
+    this.resolving.set(conversationId, pending)
+    void pending
+      .finally(() => {
+        if (this.resolving.get(conversationId) === pending) this.resolving.delete(conversationId)
+      })
+      .catch(() => undefined)
+    return pending
+  }
+
+  private async loadAgent(conversationId: string): Promise<HostAgent> {
     // Entry-point-created agents carry no session-local model selection, so the
     // route must be supplied here or prompt assembly fails ({{model}} unset).
     // Likewise the preset must be composed via setup, or the agent has no tools.
@@ -108,7 +136,7 @@ export class Bridge {
       const running = this.agents.get(sessionId(bound))
       if (running) {
         if (this.opts.exclusiveOwnership && this.owned.get(running.id)?.agent !== running)
-          throw new Error('session_owned_by_another_runtime')
+          throw new BridgeSessionError('session_owned_by_another_runtime')
         return running
       }
       try {
@@ -120,6 +148,8 @@ export class Bridge {
         this.opts.log(`resumed session ${bound} for conversation ${conversationId}`)
         return this.own(handle)
       } catch (err) {
+        // 数字员工恢复失败时保留绑定与历史，不能偷偷新建空会话。
+        if (this.opts.exclusiveOwnership) throw new BridgeSessionError('employee_session_resume_failed', { cause: err })
         this.opts.log(`resume ${bound} failed (${err instanceof Error ? err.message : err}); creating fresh`)
       }
     }

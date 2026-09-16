@@ -107,6 +107,9 @@ function createHost(workspace) {
     },
   }
   const ctx = {
+    provide(name, value) {
+      this[name] = value
+    },
     effect: (...args) => lifecycle.effect(...args),
     agents: registry,
     agentDefaultModel: { currentSelection: () => ({ provider: 'test', model: 'model' }) },

@@ -38,6 +38,7 @@ export interface DigitalEmployeeRuntimeOptions {
   readyTimeoutMs?: number
   log(line: string): void
   onMessage(input: DigitalEmployeeInbound): void | Promise<void>
+  onCardAction?(event: unknown): void
   onStatus?(status: DigitalEmployeeRuntimeStatus): void
 }
 
@@ -188,6 +189,7 @@ export class DwsDigitalEmployeeSource implements InboundSource {
       'consume',
       'user_im_message_receive_o2o_all',
       'user_im_message_receive_group_all',
+      ...(this.options.onCardAction ? ['user_card_action_triggered'] : []),
       '--flatten',
       '--format',
       'ndjson',
@@ -224,6 +226,11 @@ export class DwsDigitalEmployeeSource implements InboundSource {
         value = JSON.parse(line)
       } catch {
         this.options.log('event parse rejected (invalid_json)')
+        return
+      }
+      // 卡片控制事件不得等待正在阻塞于审批/问答的普通消息队列。
+      if ((value as { type?: string })?.type === 'user_card_action_triggered') {
+        if (!this.stopped) this.options.onCardAction?.(value)
         return
       }
       this.eventChain = this.eventChain

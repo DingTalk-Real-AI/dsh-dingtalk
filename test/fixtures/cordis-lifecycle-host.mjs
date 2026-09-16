@@ -14,6 +14,16 @@ process.env.DSH_DINGTALK_STATE_DIR = path.join(dir, 'state')
 const root = new Context()
 const ownedHandles = []
 const agents = new Map()
+let followups = 0
+root.provide('agentPresets', {
+  resolve: async () => {
+    if (mode === 'preset-missing') throw new Error('fixture preset not found')
+    return { id: 'fixture-preset' }
+  },
+  mount: async () => {
+    if (mode === 'preset-mount') throw new Error('fixture mount failure')
+  },
+})
 root.provide('agents', {
   get: (id) => agents.get(id),
   create: async ({ sessionId, setup }) => {
@@ -23,6 +33,7 @@ root.provide('agents', {
       id: sessionId,
       ctx: { on: () => () => {} },
       followup() {
+        followups++
         root.emit(
           'session/event',
           { id: sessionId },
@@ -99,12 +110,23 @@ let robotEntered = false
 let robotStops = 0
 let code = 0
 try {
-  if (['reload', 'SIGTERM', 'SIGINT', 'owned-SIGTERM', 'owned-SIGINT'].includes(mode)) {
+  if (
+    [
+      'reload',
+      'SIGTERM',
+      'SIGINT',
+      'owned-SIGTERM',
+      'owned-SIGINT',
+      'preset-missing',
+      'preset-mount',
+      'session-conflict',
+    ].includes(mode)
+  ) {
     const bin = path.join(dir, 'bin')
     await mkdir(bin)
     await writeFile(path.join(bin, 'package.json'), JSON.stringify({ type: 'commonjs' }))
     await copyFile(new URL('./lifecycle-dws.cjs', import.meta.url), path.join(bin, 'dws'))
-    if (mode.startsWith('owned-')) {
+    if (mode.startsWith('owned-') || mode.startsWith('preset-') || mode === 'session-conflict') {
       const script = await readFile(path.join(bin, 'dws'), 'utf8')
       await writeFile(path.join(bin, 'dws'), script.replace("content: '/help'", "content: 'fixture model request'"))
     }
@@ -122,6 +144,20 @@ try {
       bindingRevision: 1,
       protocolVersion: 1,
     }))
+    if (mode === 'session-conflict') {
+      for (const id of employeeIds) {
+        const state = path.join(process.env.DSH_DINGTALK_STATE_DIR, 'digital-employees', id)
+        await mkdir(state, { recursive: true })
+        const session = `stored-${id}`
+        await writeFile(path.join(state, 'bindings.json'), JSON.stringify({ [`${id}:fixture-conversation`]: session }))
+        agents.set(session, {
+          id: session,
+          followup() {
+            assert.fail('不得借用不属于自己的 Agent')
+          },
+        })
+      }
+    }
   }
   if (mode === 'slow-control') replacement = await serveEmployeeControl(async () => ({ fixture: true }))
   if (mode === 'slow-robot') {
@@ -171,6 +207,7 @@ try {
           Boolean,
         ),
       )
+      for (const id of employeeIds) await writeFile(path.join(process.env.DSH_HOME, id, 'reply-release'), 'release')
     }
     if (mode === 'reload') {
       await fiber.restart()
@@ -188,6 +225,24 @@ try {
       assert.equal(ownedHandles.length, employeeIds.length, '必须真正创建双员工 Agent，不能只测试 /help')
       // 模拟宿主先销毁 Agent inbox；插件仍需等待幂等 handle.dispose，然后释放租约。
       await Promise.all(ownedHandles.map((handle) => handle.dispose()))
+    }
+    if (mode.startsWith('preset-')) {
+      assert.equal(followups, 0, '预设失败不得降级成空工具模型请求')
+      for (const id of employeeIds) {
+        const text = await readFile(path.join(process.env.DSH_HOME, id, 'reply-text'), 'utf8')
+        assert.match(text, /工具预设.*不可用/)
+        assert.match(text, /AGENT_PRESET_UNAVAILABLE/)
+        assert.doesNotMatch(text, /fixture response/)
+      }
+    }
+    if (mode === 'session-conflict') {
+      assert.equal(followups, 0)
+      for (const id of employeeIds) {
+        const text = await readFile(path.join(process.env.DSH_HOME, id, 'reply-text'), 'utf8')
+        assert.match(text, /SESSION_OWNERSHIP_CONFLICT/)
+        assert.match(text, /历史记录保留/)
+        assert.doesNotMatch(text, /stored-|session_owned_by_another_runtime/)
+      }
     }
     const signal = mode.replace(/^owned-/, '')
     if (signal.startsWith('SIG')) {

@@ -21,7 +21,9 @@ import { Outbound } from './outbound.js'
 import { Emotion } from './emotion.js'
 import { AICard, CardCapability, type CardTarget } from './aicard.js'
 import { Renderer } from './renderer.js'
-import { Bridge } from './bridge.js'
+import { Bridge, BridgeSessionError } from './bridge.js'
+import { EmployeeSessionRouter } from './digital-employee-session-router.js'
+import { describeTurnError } from './errors.js'
 import { JsonStore } from './jsonstore.js'
 import { Queue } from './queue.js'
 import { Commands, isSessionControl, type ModelOverride } from './commands.js'
@@ -37,6 +39,7 @@ import { resolveStateDir } from './paths.js'
 import { EmployeeRuntimeRegistry, type EmployeeRuntime } from './digital-employee-lifecycle.js'
 import { serveEmployeeControl } from './digital-employee-control.js'
 import { EmployeeLease } from './digital-employee-lease.js'
+import { employeeA2ui } from './digital-employee-a2ui.js'
 import { cardTarget } from './targets.js'
 import { DwsDigitalEmployeeSource, type DigitalEmployeeInbound } from './digital-employee-runtime.js'
 import { DigitalEmployeeApprovalManager, DigitalEmployeeTextRenderer } from './digital-employee-renderer.js'
@@ -62,8 +65,29 @@ export const name = 'dingtalk-channel'
 export const inject = ['agents', 'agentDefaultModel', 'credentials', 'llm']
 export { Config }
 
+/** 预设不可用时禁止以空工具集继续；与模型、凭据故障分开报告。 */
+class AgentPresetUnavailable extends Error {
+  readonly code = 'AGENT_PRESET_UNAVAILABLE'
+  constructor(cause?: unknown) {
+    super('工具预设不可用，本轮尚未请求模型或执行工具。', { cause })
+  }
+}
+
 export async function apply(ctx: Context, config: Config): Promise<void> {
   const log = (line: string) => console.log(`[dsh-dingtalk ${new Date().toTimeString().slice(0, 8)}] ${line}`)
+  const sessionRouter = new EmployeeSessionRouter()
+  const employeeBindings = new Map<string, JsonStore<string>>()
+  const bindingsFor = (id: string) => {
+    let bindings = employeeBindings.get(id)
+    if (!bindings) {
+      bindings = new JsonStore<string>(path.join(resolveStateDir(), 'digital-employees', id, 'bindings.json'), log)
+      employeeBindings.set(id, bindings)
+      sessionRouter.reserve(id, bindings)
+    }
+    return bindings
+  }
+  for (const employee of validateDigitalEmployeeConfigs(config.digitalEmployees ?? [])) bindingsFor(employee.agentUuid)
+  ;(ctx as any).provide('dingtalkSessionRouter', sessionRouter)
 
   const credentialProvider = (ctx as any).credentials as
     | {
@@ -89,7 +113,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   const cwd = config.workspace || path.join(os.homedir(), 'dsh-dingtalk-workspace')
   fs.mkdirSync(cwd, { recursive: true })
   const employees = new EmployeeRuntimeRegistry((employee, instanceId) =>
-    startDigitalEmployee(ctx, config, employee, cwd, instanceId),
+    startDigitalEmployee(ctx, config, employee, cwd, instanceId, bindingsFor(employee.agentUuid), sessionRouter),
   )
   let controlReady = false
   try {
@@ -173,6 +197,8 @@ async function startDigitalEmployee(
   employee: DigitalEmployeeConfig,
   cwd: string,
   runtimeInstanceId: string,
+  bindings: JsonStore<string>,
+  sessionRouter: EmployeeSessionRouter,
 ): Promise<EmployeeRuntime> {
   const log = (line: string) =>
     console.log(`[dsh-dingtalk:de:${employee.agentUuid} ${new Date().toTimeString().slice(0, 8)}] ${line}`)
@@ -194,7 +220,6 @@ async function startDigitalEmployee(
     log,
   })
   void workspace.start()
-  const bindings = new JsonStore<string>(path.join(stateDir, 'bindings.json'), log)
   const modelOverrides = new JsonStore<ModelOverride>(path.join(stateDir, 'models.json'), log)
   const workspaceOverrides = new JsonStore<string>(path.join(stateDir, 'workspaces.json'), log)
   const queue = new Queue(log)
@@ -204,6 +229,10 @@ async function startDigitalEmployee(
   let bridge!: Bridge
   let renderer!: DigitalEmployeeTextRenderer
   let approvals!: DigitalEmployeeApprovalManager
+  const a2ui =
+    process.env.DSH_DINGTALK_A2UI_AGENT === employee.agentUuid
+      ? employeeA2ui(employee, config.approvalTimeoutMs, log)
+      : undefined
   let commands!: Commands
   let stopping = false
   const callbacks = new Set<Promise<unknown>>()
@@ -212,6 +241,7 @@ async function startDigitalEmployee(
     employee,
     stateDir,
     log,
+    onCardAction: a2ui ? (event) => a2ui.handleEvent(event) : undefined,
     onMessage: (input) => {
       if (stopping) return
       const task = handleMessage(input)
@@ -223,7 +253,7 @@ async function startDigitalEmployee(
   async function handleMessage(input: DigitalEmployeeInbound) {
     commandReplyEvents.set(input.message.msgId, input.event)
     try {
-      if (await routeDigitalEmployeePreTask(input, commands, approvals)) return
+      if (await routeDigitalEmployeePreTask(input, commands, a2ui ?? approvals)) return
     } finally {
       commandReplyEvents.delete(input.message.msgId)
     }
@@ -242,6 +272,23 @@ async function startDigitalEmployee(
         eventsByMessageId.delete(input.message.msgId)
         renderer.discard(input.message.msgId)
         log(`task failed (${error instanceof Error ? error.message : 'unknown'})`)
+        {
+          try {
+            const code =
+              error instanceof AgentPresetUnavailable || error instanceof BridgeSessionError
+                ? error.code
+                : 'CONNECTOR_TASK_FAILED'
+            // 只发固定错误码和处理建议，不把内部异常、路径或未知投递内容带入消息。
+            await replySink.reply(
+              input.event,
+              bindings.get(input.scopeKey) ?? `configuration:${input.event.eventId}`,
+              describeTurnError(undefined, code).replace(/[*`>#]/g, ''),
+              'task_failed',
+            )
+          } catch {
+            log('task error reply delivery unconfirmed; not retrying')
+          }
+        }
         try {
           await replySink.audit({
             eventId: input.event.eventId,
@@ -325,6 +372,7 @@ async function startDigitalEmployee(
       eventsByMessageId.delete(msg.msgId)
       if (event) {
         approvals.bindSession(agent.id, event)
+        a2ui?.bindSession(agent.id)
         await replySink.audit({
           eventId: event.eventId,
           sessionId: agent.id,
@@ -336,19 +384,24 @@ async function startDigitalEmployee(
     },
     compose: async () => {
       const presets = (ctx as any).get?.('agentPresets') as HostAgentPresets | undefined
-      if (!presets) return { setup: async (agentCtx: HostAgentContext) => approvals.install(agentCtx) }
+      if (!presets) throw new AgentPresetUnavailable()
       try {
         const resolved = await presets.resolve(undefined)
         return {
           agentPreset: resolved.id,
           setup: async (agentCtx: HostAgentContext) => {
-            await presets.mount(agentCtx, resolved.id)
-            approvals.install(agentCtx)
+            try {
+              await presets.mount(agentCtx, resolved.id)
+            } catch (error) {
+              log(`preset mount failed (${error instanceof Error ? error.message : error})`)
+              throw new AgentPresetUnavailable(error)
+            }
+            ;(a2ui ?? approvals).install(agentCtx)
           },
         }
       } catch (error) {
         log(`preset compose failed (${error instanceof Error ? error.message : error})`)
-        return { setup: async (agentCtx: HostAgentContext) => approvals.install(agentCtx) }
+        throw new AgentPresetUnavailable(error)
       }
     },
   })
@@ -356,6 +409,7 @@ async function startDigitalEmployee(
     renderer.onSessionEvent(session, event)
   })
   let stopPromise: Promise<void> | undefined
+  let deactivateSessionRoute: (() => void) | undefined
   const lease = new EmployeeLease(employee, runtimeInstanceId, () => {
     void ownedRuntime.stop().catch(() => log('employee lease lost; release unconfirmed'))
   })
@@ -368,6 +422,10 @@ async function startDigitalEmployee(
         await lease.start()
         if (stopping) throw new Error('employee_stopping')
         await runtime.start()
+        deactivateSessionRoute = sessionRouter.activate(employee.agentUuid, async (id) => {
+          if (stopping || lease.lost) throw new BridgeSessionError('employee_stopping')
+          return bridge.resolveBoundSession(id)
+        })
         log(`channel up: profile=${employee.dwsProfile} protocol=1 text-only`)
       } catch (error) {
         await ownedRuntime.stop()
@@ -378,8 +436,10 @@ async function startDigitalEmployee(
     stop: () =>
       (stopPromise ??= (async () => {
         stopping = true
+        deactivateSessionRoute?.()
         queue.close()
         approvals.close()
+        a2ui?.close()
         const sourceStopped = runtime.stop()
         // dispose 的确认只覆盖本 Bridge 创建/恢复的 Agent，不触碰其他宿主实例。
         renderer.releaseOwned(await bridge.close())
@@ -387,6 +447,7 @@ async function startDigitalEmployee(
         await queue.drain()
         await Promise.allSettled([...callbacks])
         await replySink.drain()
+        await a2ui?.drain()
         if (typeof detach === 'function') detach()
         await lease.stop()
       })()),

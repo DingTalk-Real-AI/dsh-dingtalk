@@ -23,6 +23,10 @@ export class JsonStore<T> {
     return this.map.get(key)
   }
 
+  entries(): Array<[string, T]> {
+    return [...this.map.entries()]
+  }
+
   set(key: string, value: T): void {
     this.map.set(key, value)
     this.save()

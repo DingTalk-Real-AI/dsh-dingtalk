@@ -115,6 +115,9 @@ test('同一私聊按顺序回复格式错误、Unicode 绑定成功和后续状
   const { apply } = await import(`../lib/index.js?binding-replies=${Date.now()}`)
   const workspace = { path: root, sessionIds: [], async attachSession() {} }
   const ctx = {
+    provide(name, value) {
+      this[name] = value
+    },
     effect: (...args) => lifecycle.effect(...args),
     credentials: { async resolve() {} },
     agents: {},

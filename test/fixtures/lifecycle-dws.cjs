@@ -58,9 +58,11 @@ if (args.includes('--local-lease')) {
     if (args.includes('binding')) {
       envelope({ ...value, dwsProfile: profile, channel: 'dsh', bindingState: 'bound', desiredState: 'running' })
     } else if (args.includes('reply')) {
+      const firstReply = !fs.readFileSync(file('operations'), 'utf8').includes('reply-started')
+      fs.writeFileSync(file('reply-text'), value.text)
       fs.writeFileSync(file('reply-active'), String(process.pid), { flag: 'wx' })
       record('reply-started')
-      setTimeout(() => {
+      const finish = () => {
         fs.unlinkSync(file('reply-active'))
         record('reply-completed')
         envelope({
@@ -69,7 +71,13 @@ if (args.includes('--local-lease')) {
           idempotencyKey: value.idempotencyKey,
           deliveryStatus: 'delivered',
         })
-      }, 300)
+      }
+      // 首次下行用显式屏障，避免双员工的 300ms 窗口不重叠导致误报超时。
+      const release = () => {
+        if (firstReply && !fs.existsSync(file('reply-release'))) return setTimeout(release, 10)
+        setTimeout(finish, 300)
+      }
+      release()
     } else {
       throw new Error('unexpected_fixture_command')
     }
