@@ -24,15 +24,73 @@ export interface A2uiCard {
 
 export type A2uiMessage = Record<string, unknown>
 
+export type A2uiInteractionState = Terminal | 'waiting-approval' | 'waiting-input' | 'waiting-choice' | 'timed-out'
+
+/** 交互状态不是模型执行状态；摘要只包含固定文案，不带用户答案或工具参数。 */
+export interface A2uiPresentation {
+  state: A2uiInteractionState
+  summary: string
+  summaryComponentId: string
+  /** 已转义的 Markdown 标题；与会话列表的固定 summary 分开。 */
+  titleMarkdown?: string
+}
+
+function presentation(state: A2uiInteractionState): A2uiPresentation {
+  const summary = {
+    'waiting-approval': '等待你的确认',
+    'waiting-input': '等待你填写回答',
+    'waiting-choice': '等待你选择或填写',
+    'allowed-once': '已批准本次操作（不代表执行成功）',
+    answered: '回答已提交',
+    rejected: '已拒绝本次操作',
+    cancelled: '已取消',
+    unavailable: '请求已失效，请重新发起',
+    'timed-out': '等待超时，请重新发起',
+  }[state]
+  const title = {
+    'waiting-approval': '操作确认',
+    'waiting-input': '请填写回答',
+    'waiting-choice': '请选择',
+    'allowed-once': '已允许一次',
+    answered: '已提交',
+    rejected: '已拒绝',
+    cancelled: '已取消',
+    unavailable: '请求已失效',
+    'timed-out': '等待已超时',
+  }[state]
+  return { state, summary, summaryComponentId: 'title', titleMarkdown: `## ${title}` }
+}
+
+function presentMessages(messages: A2uiMessage[], value: A2uiPresentation): A2uiMessage[] {
+  return messages.map((message) => {
+    const update = object(message.updateComponents)
+    if (!update || !Array.isArray(update.components)) return message
+    return {
+      ...message,
+      updateComponents: {
+        ...update,
+        components: update.components.map((component) =>
+          component.id === value.summaryComponentId
+            ? { ...component, content: value.titleMarkdown ?? `## ${value.summary}` }
+            : component,
+        ),
+      },
+    }
+  })
+}
+
 /** 传输负责创建真实 Surface，再调用 render；不把任意 ID 当作已创建的 Surface。 */
 export interface A2uiTransport {
   create(input: {
     interactionId: string
     target: A2uiRoute['target']
+    presentation: A2uiPresentation
     render(surfaceId: string): A2uiMessage[]
     signal: AbortSignal
   }): Promise<A2uiCard>
-  update(card: A2uiCard, messages: A2uiMessage[], signal: AbortSignal): Promise<void>
+  /** 创建后已登记回调路由，再同步等待态；旧传输可不实现。不得重置表单数据。 */
+  setWaiting?(card: A2uiCard, presentation: A2uiPresentation, signal: AbortSignal): Promise<void>
+  update(card: A2uiCard, messages: A2uiMessage[], signal: AbortSignal, presentation: A2uiPresentation): Promise<void>
 }
 
 export interface A2uiInteractionOptions {
@@ -52,7 +110,7 @@ interface Pending {
   expiresAt: number
   kind: 'approval' | 'ask'
   questions: readonly HostUserQuestionItem[]
-  finish(outcome: Terminal, answers?: HostUserQuestionAnswer): void
+  finish(outcome: Terminal, answers?: HostUserQuestionAnswer, timedOut?: boolean): void
 }
 
 type Terminal = HostApprovalOutcome | 'answered'
@@ -131,11 +189,11 @@ function terminalHeader(outcome: Terminal): Record<string, unknown>[] {
     rejected: ['⛔ 已拒绝', '本次请求未获授权。'],
     cancelled: ['○ 已取消', '本次交互已结束，无需继续操作。'],
     unavailable: ['⌛ 请求已失效', '本次请求无法继续处理，请在会话中重新发起。'],
-    answered: ['✅ 回答已提交', '已将以下回答交回当前请求；这不代表批准执行工具。'],
+    answered: ['已提交', ''],
   }[outcome]
   return [
     { id: 'title', component: 'Markdown', content: `## ${title}` },
-    { id: 'status', component: 'Markdown', content: description },
+    ...(description ? [{ id: 'status', component: 'Markdown', content: description }] : []),
   ]
 }
 
@@ -152,13 +210,11 @@ function approvalCard(surfaceId: string, id: string, tool: string, detail?: stri
     {
       id: 'root',
       component: 'Column',
-      gap: 12,
-      children: ['title', 'status', ...details.map((c) => c.id), 'hint', 'actions'],
+      gap: 8,
+      children: ['title', ...details.map((c) => c.id), 'actions'],
     },
-    { id: 'title', component: 'Markdown', content: '## 🔐 操作确认' },
-    { id: 'status', component: 'Markdown', content: '**等待你的确认** · 授权仅本次有效' },
+    { id: 'title', component: 'Markdown', content: '## 操作确认' },
     ...details,
-    { id: 'hint', component: 'Markdown', content: '> 请先核对操作内容。不确定时可选择「拒绝」。' },
     { id: 'actions', component: 'Row', children: ['approve_once', 'reject'] },
     ...(['approve_once', 'reject'] as const).flatMap((action) => [
       {
@@ -174,13 +230,13 @@ function approvalCard(surfaceId: string, id: string, tool: string, detail?: stri
 }
 
 function questionCard(surfaceId: string, id: string, questions: readonly HostUserQuestionItem[]): A2uiMessage[] {
-  const children: string[] = ['title', 'status']
+  const single = questions.length === 1
+  const children: string[] = ['title']
   const components: Record<string, unknown>[] = [
-    { id: 'title', component: 'Markdown', content: '## 💬 需要你补充信息' },
     {
-      id: 'status',
+      id: 'title',
       component: 'Markdown',
-      content: `共 **${questions.length}** 个问题 · 填写后统一提交；不确定的项目可留空。`,
+      content: `## ${single ? markdownText(questions[0].question) : '请补充以下信息'}`,
     },
   ]
   const answers: Record<string, unknown> = {}
@@ -188,18 +244,20 @@ function questionCard(surfaceId: string, id: string, questions: readonly HostUse
     // 不把任意问题 ID 拼进 JSON Pointer；回传时再映射回宿主 ID。
     const key = `q${index}`
     answers[key] = { selected: [], custom: '' }
-    children.push(`${key}_title`)
-    components.push({
-      id: `${key}_title`,
-      component: 'Markdown',
-      content: `### ${index + 1}. ${markdownText(question.header || question.question)}`,
-    })
-    if (question.header || question.detail) {
+    if (!single) {
+      children.push(`${key}_title`)
+      components.push({
+        id: `${key}_title`,
+        component: 'Markdown',
+        content: `### ${index + 1}. ${markdownText(question.question)}`,
+      })
+    }
+    if (question.detail && question.detail.trim() !== question.question.trim()) {
       children.push(`${key}_detail`)
       components.push({
         id: `${key}_detail`,
         component: 'Markdown',
-        content: [question.question, question.detail].filter(Boolean).join('\n\n'),
+        content: question.detail,
       })
     }
     if (question.options?.length) {
@@ -207,26 +265,22 @@ function questionCard(surfaceId: string, id: string, questions: readonly HostUse
       components.push({
         id: `${key}_choices`,
         component: 'ChoicePicker',
+        label: question.multiSelect ? '可多选' : '选择一项',
         variant: question.multiSelect ? 'multipleSelection' : 'mutuallyExclusive',
         displayStyle: 'checkbox',
-        options: question.options.map((option, i) => ({ label: option.label, value: `option_${i}` })),
+        options: question.options.map((option, i) => ({
+          label: option.description?.trim() ? `${option.label} — ${option.description.trim()}` : option.label,
+          value: `option_${i}`,
+        })),
         value: { path: `/answers/${key}/selected` },
       })
-      const descriptions = question.options.filter((option) => option.description)
-      if (descriptions.length) {
-        children.push(`${key}_options_detail`)
-        components.push({
-          id: `${key}_options_detail`,
-          component: 'Markdown',
-          content: descriptions.map((option) => `${option.label}：${option.description}`).join('\n\n'),
-        })
-      }
     }
     children.push(`${key}_custom`)
     components.push({
       id: `${key}_custom`,
       component: 'TextField',
-      label: question.options?.length ? '补充说明（可选）' : '填写回答（可选）',
+      label: question.options?.length ? '其他或补充（可选）' : '回答',
+      placeholder: question.options?.length ? '没有合适选项？在这里填写' : '请输入回答（可留空）',
       variant: 'longText',
       value: { path: `/answers/${key}/custom` },
     })
@@ -250,10 +304,10 @@ function questionCard(surfaceId: string, id: string, questions: readonly HostUse
         },
       },
     })
-    components.push({ id: `${action}_label`, component: 'Text', text: action === 'submit' ? '提交回答' : '取消' })
+    components.push({ id: `${action}_label`, component: 'Text', text: action === 'submit' ? '提交' : '取消' })
   }
   return [
-    ...componentMessages(surfaceId, [{ id: 'root', component: 'Column', gap: 12, children }, ...components]),
+    ...componentMessages(surfaceId, [{ id: 'root', component: 'Column', gap: 8, children }, ...components]),
     { version: 'v1.0', updateDataModel: { surfaceId, path: '/', value: { answers } } },
   ]
 }
@@ -270,14 +324,8 @@ function questionReceipt(
     components.push({
       id: `${key}_title`,
       component: 'Markdown',
-      content: `### ${index + 1}. ${markdownText(question.header || question.question)}`,
+      content: `### ${questions.length > 1 ? `${index + 1}. ` : ''}${markdownText(question.question)}`,
     })
-    if (question.header || question.detail)
-      components.push({
-        id: `${key}_detail`,
-        component: 'Markdown',
-        content: [question.question, question.detail].filter(Boolean).join('\n\n'),
-      })
     if (outcome !== 'answered') continue
     const value = answer?.answers[index]
     if (value?.selected.length)
@@ -430,12 +478,28 @@ export class A2uiInteractions {
     return new Promise((resolve) => {
       const delivery = new AbortController()
       let finished: Terminal | undefined
+      let terminalPresentation: A2uiPresentation
+      const waitingPresentation = presentation(
+        kind === 'approval'
+          ? 'waiting-approval'
+          : questions.some((q) => q.options?.length)
+            ? 'waiting-choice'
+            : 'waiting-input',
+      )
+      if (kind === 'ask') {
+        waitingPresentation.titleMarkdown = `## ${questions.length === 1 ? markdownText(questions[0].question) : '请补充以下信息'}`
+      }
       let receiptAnswers: HostUserQuestionAnswer | undefined
       const repaint = () => {
         if (!pending.card || !finished) return
-        const messages = renderTerminal(pending.card.surfaceId, finished, receiptAnswers)
+        const messages = presentMessages(
+          renderTerminal(pending.card.surfaceId, finished, receiptAnswers),
+          terminalPresentation,
+        )
         void Promise.resolve()
-          .then(() => this.options.transport.update(pending.card!, messages, AbortSignal.timeout(10_000)))
+          .then(() =>
+            this.options.transport.update(pending.card!, messages, AbortSignal.timeout(10_000), terminalPresentation),
+          )
           .catch(() => this.options.log?.('a2ui_terminal_update_failed'))
       }
       const onAbort = () => pending.finish('cancelled')
@@ -446,9 +510,10 @@ export class A2uiInteractions {
         questions,
         route: snapshot,
         expiresAt: Date.now() + this.options.timeoutMs,
-        finish: (outcome, answers) => {
+        finish: (outcome, answers, timedOut) => {
           if (finished) return
           finished = outcome
+          terminalPresentation = presentation(timedOut ? 'timed-out' : outcome)
           receiptAnswers = answers ? structuredClone(answers) : undefined
           this.pending.delete(id)
           clearTimeout(timer)
@@ -458,7 +523,7 @@ export class A2uiInteractions {
           repaint()
         },
       }
-      const timer = setTimeout(() => pending.finish('unavailable'), this.options.timeoutMs)
+      const timer = setTimeout(() => pending.finish('unavailable', undefined, true), this.options.timeoutMs)
       this.pending.set(id, pending)
       signal?.addEventListener('abort', onAbort, { once: true })
       if (signal?.aborted) {
@@ -471,8 +536,9 @@ export class A2uiInteractions {
           return this.options.transport.create({
             interactionId: id,
             target: structuredClone(snapshot.target),
+            presentation: waitingPresentation,
             signal: delivery.signal,
-            render: (surfaceId) => render(surfaceId, id),
+            render: (surfaceId) => presentMessages(render(surfaceId, id), waitingPresentation),
           })
         })
         .then((card) => {
@@ -480,6 +546,13 @@ export class A2uiInteractions {
           if (!card.bizId || !card.surfaceId) throw new Error('a2ui_invalid_card')
           pending.card = { ...card }
           if (finished) repaint()
+          else if (this.options.transport.setWaiting)
+            void Promise.resolve()
+              .then(() => {
+                if (!finished)
+                  return this.options.transport.setWaiting!(pending.card!, waitingPresentation, delivery.signal)
+              })
+              .catch(() => this.options.log?.('a2ui_waiting_update_failed'))
         })
         .catch(() => pending.finish('unavailable'))
     })
@@ -501,7 +574,7 @@ export class A2uiInteractions {
       if (uid(operator?.uid) !== pending.route.operatorUid) return false
     } else if (operator?.openDingTalkId !== pending.route.operatorOpenDingTalkId) return false
     if (Date.now() >= pending.expiresAt) {
-      pending.finish('unavailable')
+      pending.finish('unavailable', undefined, true)
       return false
     }
     let current: A2uiRoute | undefined
