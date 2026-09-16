@@ -26,8 +26,8 @@ function harness(overrides = {}) {
         sent.push({ ...input, ...card, messages: input.render(card.surfaceId) })
         return card
       },
-      async update(card, messages) {
-        updated.push({ card, messages })
+      async update(card, messages, signal, presentation) {
+        updated.push({ card, messages, presentation })
       },
     },
     ...overrides,
@@ -40,13 +40,107 @@ async function ready() {
   await new Promise((resolve) => setImmediate(resolve))
 }
 
+test('紧凑问答：单题只显示问题标题，说明并入选项且回调仍返回原标签', async (t) => {
+  const h = harness()
+  t.after(() => h.manager.close())
+  const result = h.manager.ask(h.agent.id, {
+    questions: [
+      {
+        id: 'fruit',
+        header: '水果偏好',
+        question: '你喜欢吃什么水果？',
+        options: [{ label: '苹果', description: '清甜多汁' }, { label: '香蕉' }],
+      },
+    ],
+  })
+  void result.catch(() => {})
+  await ready()
+  const components = h.sent[0].messages[0].updateComponents.components
+  assert.equal(components.find((c) => c.id === 'title').content, '## 你喜欢吃什么水果？')
+  assert.equal(
+    components.some((c) => ['q0_title', 'q0_options_detail', 'status'].includes(c.id)),
+    false,
+  )
+  assert.deepEqual(components.find((c) => c.id === 'q0_choices').options, [
+    { label: '苹果 — 清甜多汁', value: 'option_0' },
+    { label: '香蕉', value: 'option_1' },
+  ])
+  assert.equal(
+    h.manager.handleEvent(
+      'account-1',
+      event(h.sent[0], 'submit', { answers: { q0: { selected: ['option_0'], custom: '' } } }),
+    ),
+    true,
+  )
+  assert.deepEqual(await result, { answers: [{ id: 'fruit', selected: ['苹果'] }] })
+})
+
+test('等待状态区分审批、选项和纯输入，摘要不包含工具参数或用户内容', async () => {
+  for (const [kind, questions, state, summary] of [
+    ['approval', [], 'waiting-approval', '等待你的确认'],
+    ['ask', [{ id: 'q', question: '私有问题' }], 'waiting-input', '等待你填写回答'],
+    [
+      'ask',
+      [{ id: 'q', question: '私有问题', options: [{ label: '私有选项' }] }],
+      'waiting-choice',
+      '等待你选择或填写',
+    ],
+  ]) {
+    const h = harness()
+    const result =
+      kind === 'approval'
+        ? h.manager.approve({ agent: h.agent, toolName: 'private_tool', reason: '私有参数' })
+        : h.manager.ask(h.agent.id, { questions })
+    const settled = result.catch(() => undefined)
+    await ready()
+    const { titleMarkdown, ...summaryFields } = h.sent[0].presentation
+    assert.deepEqual(summaryFields, { state, summary, summaryComponentId: 'title' })
+    const title = h.sent[0].messages[0].updateComponents.components.find((c) => c.id === 'title')
+    assert.equal(title.content, titleMarkdown)
+    assert.equal(title.content, kind === 'approval' ? '## 操作确认' : '## 私有问题')
+    h.manager.close()
+    await settled
+  }
+})
+
+test('同步等待状态时回调路由已经登记，失败也不取消原请求', async () => {
+  const logs = []
+  let input
+  const h = harness({
+    log: (line) => logs.push(line),
+    transport: {
+      async create(value) {
+        input = value
+        return { bizId: 'biz', surfaceId: 'surface' }
+      },
+      async setWaiting(card, value) {
+        assert.equal(value.state, 'waiting-approval')
+        assert.equal(h.manager.handleEvent('account-1', event({ ...input, ...card }, 'approve_once')), true)
+        throw new Error('private transport error')
+      },
+      async update(card, messages, signal, value) {
+        assert.equal(value.state, 'allowed-once')
+      },
+    },
+  })
+  assert.equal(await h.manager.approve({ agent: h.agent, toolName: 'fixture' }), 'allowed-once')
+  await ready()
+  assert.deepEqual(logs, ['a2ui_waiting_update_failed'])
+  h.manager.close()
+})
+
 test('审批等待和终态保留 Markdown 层次、请求正文及安全提示，不再退化成一句文字', async (t) => {
   const h = harness()
   t.after(() => h.manager.close())
   const result = h.manager.approve({ agent: h.agent, toolName: 'fixture_tool', reason: '**变更内容**\n\n- 只读检查' })
   await ready()
   const pending = h.sent[0].messages[0].updateComponents.components
-  assert.ok(pending.some((c) => c.component === 'Markdown' && c.content.includes('等待你的确认')))
+  assert.equal(pending.find((c) => c.id === 'title').content, '## 操作确认')
+  assert.equal(
+    pending.some((c) => ['hint', 'status'].includes(c.id)),
+    false,
+  )
+  assert.equal(pending.find((c) => c.id === 'approve_once_label').text, '允许一次')
   assert.equal(h.manager.handleEvent('account-1', event(h.sent[0], 'approve_once')), true)
   assert.equal(await result, 'allowed-once')
   await ready()
@@ -56,7 +150,7 @@ test('审批等待和终态保留 Markdown 层次、请求正文及安全提示�
     .filter((c) => c.component === 'Markdown')
     .map((c) => c.content)
     .join('\n')
-  assert.match(markdown, /## ✅ 已批准/)
+  assert.match(markdown, /## 已允许一次/)
   assert.match(markdown, /\*\*变更内容\*\*/)
   assert.match(markdown, /不代表执行成功/)
   assert.ok(completed.some((c) => c.component === 'Text' && c.text.includes('fixture_tool')))
@@ -80,7 +174,12 @@ test('ask 完成保留问题与答案，空答案明确标记，自由文本不�
   void result.catch(() => {}) // 测试断言失败后的清理取消也必须被消费。
   await ready()
   const initial = h.sent[0].messages[0].updateComponents.components
-  assert.ok(initial.some((c) => c.component === 'Markdown' && c.content.includes('需要你补充信息')))
+  assert.equal(initial.find((c) => c.id === 'title').content, '## 请补充以下信息')
+  assert.equal(initial.find((c) => c.id === 'q0_title').content, '### 1. 选择模式')
+  assert.equal(
+    initial.some((c) => c.id === 'q0_detail'),
+    false,
+  )
   const answers = {
     q0: { selected: ['option_0'], custom: '' },
     q1: { selected: [], custom },
@@ -95,7 +194,7 @@ test('ask 完成保留问题与答案，空答案明确标记，自由文本不�
     .filter((c) => c.component === 'Markdown')
     .map((c) => c.content)
     .join('\n')
-  assert.match(markdown, /## ✅ 回答已提交/)
+  assert.match(markdown, /## 已提交/)
   assert.ok(completed.some((c) => c.component === 'Text' && c.text === '已选：安全'))
   assert.match(markdown, /未填写/)
   assert.doesNotMatch(markdown, /宿主后续修改|<a atId|\*\*not a heading\*\*/)
@@ -394,6 +493,8 @@ test('超时、AbortSignal、关闭和解绑 Agent 均结束等待并拒绝晚�
       if (mode === 'close') h.manager.close()
       if (mode === 'dispose') h.dispose()
       assert.equal(await result, mode === 'timeout' ? 'unavailable' : 'cancelled')
+      await ready()
+      assert.equal(h.updated[0].presentation.state, mode === 'timeout' ? 'timed-out' : 'cancelled')
       assert.equal(h.manager.handleEvent('account-1', event(h.sent[0], 'approve_once')), false)
       h.manager.close()
     })

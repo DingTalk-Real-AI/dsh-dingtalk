@@ -45,7 +45,11 @@ main 已有原生 `approval/request`、`user-questions/request` 类型与处理�
    `create` 得到真实 Surface 后调用 `input.render(surfaceId)`，按顺序发送消息数组，
    只有真实创建并投递成功才能返回 `{ bizId, surfaceId }`。禁止把 request ID 当卡片业务 ID，
    或随意编造 Surface ID。`target.id` 使用传输约定的 ID 空间，不跨 staffId / UID / OpenDingTalkId 猜测转换。
+   `create` 的 `input.presentation` 和 `update` 的第四个参数提供显式交互状态、固定摘要及摘要组件 ID。
    `update` 接收终态组件消息，传输层还要设置对应卡片流转状态。
+   若创建接口只能使用默认处理中状态，可实现可选的 `setWaiting(card, presentation, signal)`：
+   创建返回且回调路由登记后同步等待态；只能更新摘要组件，不能重发初始表单数据。
+   同一卡片的等待态与终态更新应串行，等待态更新失败不取消原请求。
    两个方法必须遵守 AbortSignal；不做无条件发卡重试，不承诺 exactly-once。
 
 示意接线（`cardTransport` 和 `trustedRoute` 必须由接入方实现，不是已实现的 DWS Adapter）：
@@ -110,7 +114,55 @@ ask 仅补充信息，包括 Plan Review；它不是宿主工具执行授权，�
 宿主显式提供的 reason/detail 继续支持 Markdown。答案回执持有独立快照，不受宿主后续修改返回值影响。
 “已批准”不代表工具执行成功。状态更新失败只记通用错误，不改变已作出的决定，不重复恢复宿主。
 
+### 会话摘要与等待状态
+
+参考 [Codex App Server 的线程状态与审批请求](https://learn.chatgpt.com/docs/app-server)，
+区分“等待用户操作”和“模型正在工作”，不通过是否存在最终产物来判断交互状态。
+以下中文文案是连接器的本地化设计，并非 Codex 官方文案。
+
+| 交互状态     | 摘要                             | 本地 DWS 适配流转状态 |
+| ------------ | -------------------------------- | --------------------- |
+| 等待审批     | 等待你的确认                     | CONFIRMING            |
+| 带选项的问答 | 等待你选择或填写                 | CONFIRMING            |
+| 纯输入问答   | 等待你填写回答                   | CONFIRMING            |
+| 回答提交     | 回答已提交                       | FINISH                |
+| 本次批准     | 已批准本次操作（不代表执行成功） | CONFIRMED             |
+| 拒绝 / 取消  | 已拒绝本次操作 / 已取消          | ABORTED               |
+| 超时         | 等待超时，请重新发起             | TIMEOUT               |
+| 不可用       | 请求已失效，请重新发起           | ERROR                 |
+
+卡片 `title` Markdown 组件承载 `titleMarkdown`（单题的问题标题、多题引导或简短终态）；
+创建时的固定 `summary` 独立用于会话摘要。等待态同步保留标题，不能再用摘要覆盖问题。
+创建和每次更新均传递指向标题的 `artifact` 注解，不把整张问答卡片或用户答案标成产物。
+客户端若优先使用 artifact，也可能显示问题标题；不能保证它始终使用创建时的 summary。
+超时对宿主仍返回 `unavailable`，不改变授权契约。
+DWS 当前创建接口固定 PROCESSING，因此投递后需再更新为 CONFIRMING，期间可能短暂显示处理中。
+客户端 lastMessage 是否采用摘要、是否优先显示流转状态，需实机验收；这不是一个直接设置 lastMessage 的 API。
+
+本地员工适配要求 DWS `send-a2ui-card` 支持 `--summary`，创建时显式传入上述固定等待文案。
+旧 DWS 把组件 JSON 拼入 `summary`，仅增加 artifact 注解不能解决会话列表泄露协议正文的问题。
+配套 DWS 修复使用“交互卡片”作为默认摘要，不支持该参数的版本不能用于此本地适配。
+当前服务端 `update_a2ui_card` 的公开工具 Schema 不包含 `summary`，因此更新仍只修改组件、注解与流转状态；
+不能保证终态会话预览同步变化，也不会虚构更新参数或重发卡片来模拟更新。旧卡片需重新发起交互验收。
+
 ## 生命周期与验收
+
+### 紧凑交互模板
+
+- 单题以完整问题作唯一主标题，省略分类 header、题号和问题数量提示；多题保留编号后的完整问题。
+- 选项说明直接并入 `ChoicePicker.options[].label`，例如“苹果 — 清甜多汁”，不再另列说明区域。
+  当前公开 Catalog 没有 option.description 字段；不虚构子标题或 Markdown 选项能力。
+  选项 value 仍为稳定的 `option_N`，恢复宿主时只映射回原 label，不能把展示说明当作答案。
+- 单选/多选有短标签；自由输入保留为“其他或补充（可选）”，允许无匹配选项时自行回答。
+- 审批只保留“操作确认”、原始工具名、完整 reason 和“允许一次 / 拒绝”；不截断有风险含义的正文。
+- 完成后使用简短状态标题、问题和答案回执，不重列选项说明。审批批准仍明确不代表执行成功。
+- 仅使用已公开的组件字段；原生选项行的高度、换行和跨端视觉效果仍需钉钉实机验收。
+
+设计参考：[Slack 确认交互](https://docs.slack.dev/reference/block-kit/composition-objects/confirmation-dialog-object/)
+的标题、说明与明确操作结构，以及 [GOV.UK Radios](https://design-system.service.gov.uk/components/radios/)
+将提示就近放在对应选项内的模式；没有引入它们的私有组件协议。
+
+### 生命周期
 
 pending 只保存在内存中：宿主关闭、卸载或请求中止时结束等待。进程崩溃后没有可恢复 Promise，
 重启不重新执行旧操作。晚返回的创建结果会尝试更新为失效状态，未知创建结果可能留下不可再授权的旧卡片。
