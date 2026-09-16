@@ -36,7 +36,8 @@ main 已有原生 `approval/request`、`user-questions/request` 类型与处理�
 
 接入方注入两个真实变化的接口：
 
-1. `route(sessionId, kind)`：从可信配置返回目标、允许操作人的 **UID** 和 `bindingId`。
+1. `route(sessionId, kind)`：从可信配置返回目标、允许操作人的身份和 `bindingId`。
+   `operatorUid` 与 `operatorOpenDingTalkId` 必须二选一，分别匹配服务端 `operatorDTO` 的同名身份空间，不能混用。
    approve 必须选已验证的管理员；ask 通常选提问对象。无法解析就返回 `undefined`，不可默认拿发送者当审批人。
    `bindingId` 是接入方的授权版本标识，撤权或换绑后必须变化，不能复用旧值。
    每次回调重新读取路由，校验目标、操作人及授权版本；已经改变的绑定无法批准旧请求。
@@ -77,11 +78,15 @@ ask：`Column` + `Text` / `Markdown` + `ChoicePicker`（单选或多选）+ `Tex
 
 ```text
 payload.body.bizInfoDTO.bizId
-payload.body.operatorDTO.uid
-payload.body.actionData.context.interactionId
-payload.body.actionData.context.action
-payload.body.actionData.context.answers  # 仅 ask submit
+payload.body.operatorDTO.openDingTalkId  # operatorOpenDingTalkId 路由
+payload.body.a2uiEvent.action.context.interactionId
+payload.body.a2uiEvent.action.context.action
+payload.body.a2uiEvent.action.context.answers  # 仅 ask submit
 ```
+
+兼容旧的 `payload.body.actionData.context` 格式，以及显式配置 `operatorUid` 路由时的
+`payload.body.operatorDTO.uid`。两种动作格式同时存在时，interactionId、action 和 answers 必须一致；
+畸形新格式不降级到旧格式。动作格式和身份空间分别校验，不将一种身份当作另一种身份的替代值。
 
 `operatorDTO.uid` 只接受数字字符串或安全整数；64 位 UID 若已经被普通 JSON.parse 截断，拒绝处理，
 由接入方使用无损解析保留字符串。`createUid`、客户端自报身份或问题定义不能代替服务端操作人和本地请求快照。
@@ -109,11 +114,16 @@ pending 只保存在内存中：宿主关闭、卸载或请求中止时结束等
 本地测试覆盖原生事件入口、卡片内容、结构化答案、身份/卡片/来源不匹配、授权版本变化、并发请求、重复点击、
 超时、AbortSignal、卸载、发卡失败及晚返回、终态更新失败和打包导入。
 
+2026-09-16 使用独立 Cordis 验收夹具和 haoxiao 测试版 DWS `v0.0.0-build.27.2` 实测：
+真实原子卡片点击以 `a2uiEvent.action.context` 回传，服务端操作人提供 `operatorDTO.openDingTalkId`。
+修复后批准回调恢复为 `allowed-once`，ask 单选、多选和留空文本回传成功，两个终态更新获服务端接受。
+本轮没有执行工具，未验证非空文本与终态客户端显示，也不等于实际 DSH Agent / 模型运行时端到端验收。
+
 实机接入前必须验证：
 
 - 原子组件在目标钉钉客户端可显示，输入绑定和按钮 context 求值正确。
 - 真正发卡响应能取得业务 ID 和 Surface ID，且可更新终态。
-- 哪个 Profile 能消费该卡片回调；实际 UID 与管理员/提问对象的可信映射。
+- 哪个 Profile 能消费该卡片回调；实际 UID 或 OpenDingTalkId 与管理员/提问对象的可信映射。
 - `action.event.context` 到上述回调字段的映射，不把静态样例当作线上证据。
 - 在真实 DSH 宿主恢复原请求，且非授权人、重复点击、撤权和超时均不能执行工具。
 

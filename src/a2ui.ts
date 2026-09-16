@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { isDeepStrictEqual } from 'node:util'
 import type {
   HostAgentContext,
   HostApprovalOutcome,
@@ -9,13 +10,12 @@ import type {
   SessionId,
 } from './host.js'
 
-/** 由接入方从可信配置解析；UID 不能用 staffId 或 OpenDingTalkId 代替。 */
-export interface A2uiRoute {
+/** 由接入方从可信配置解析；必须明确身份命名空间，不能互换 UID、staffId、OpenDingTalkId。 */
+export type A2uiRoute = {
   target: { type: 'user' | 'group'; id: string }
-  operatorUid: string
   /** 换绑、撤权时必须变化；不依赖数字员工协议。 */
   bindingId: string
-}
+} & ({ operatorUid: string; operatorOpenDingTalkId?: never } | { operatorUid?: never; operatorOpenDingTalkId: string })
 
 export interface A2uiCard {
   bizId: string
@@ -71,6 +71,37 @@ function uid(value: unknown): string | undefined {
   if (typeof value === 'string' && /^\d+$/.test(value)) return value
   if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) return String(value)
   return undefined
+}
+
+function identity(route: A2uiRoute): string | undefined {
+  if (route.operatorUid !== undefined && route.operatorOpenDingTalkId === undefined) {
+    const value = uid(route.operatorUid)
+    return value ? `uid:${value}` : undefined
+  }
+  if (
+    route.operatorUid === undefined &&
+    typeof route.operatorOpenDingTalkId === 'string' &&
+    route.operatorOpenDingTalkId.trim()
+  )
+    return `openDingTalkId:${route.operatorOpenDingTalkId}`
+  return undefined
+}
+
+function actionContext(body: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+  const atomic = object(object(object(body?.a2uiEvent)?.action)?.context)
+  const legacy = object(object(body?.actionData)?.context)
+  // 两种格式同时存在时必须一致；畸形新格式也不能降级绕过校验。
+  if (body && Object.hasOwn(body, 'a2uiEvent')) {
+    if (!atomic) return undefined
+    if (Object.hasOwn(body, 'actionData')) {
+      if (!legacy) return undefined
+      for (const key of ['interactionId', 'action', 'answers']) {
+        if (!isDeepStrictEqual(atomic[key], legacy[key])) return undefined
+      }
+    }
+    return atomic
+  }
+  return legacy
 }
 
 function componentMessages(surfaceId: string, components: Record<string, unknown>[]): A2uiMessage[] {
@@ -298,7 +329,7 @@ export class A2uiInteractions {
     } catch {
       return Promise.resolve({ outcome: 'unavailable' })
     }
-    if (!route || !uid(route.operatorUid) || !route.bindingId || !route.target.id)
+    if (!route || !identity(route) || !route.bindingId || !route.target.id)
       return Promise.resolve({ outcome: 'unavailable' })
     const id = randomUUID()
     const snapshot = structuredClone(route)
@@ -376,11 +407,15 @@ export class A2uiInteractions {
     const envelope = object(event)
     if (envelope?.type !== 'user_card_action_triggered') return false
     const body = object(object(envelope.payload)?.body)
-    const context = object(object(body?.actionData)?.context)
+    const context = actionContext(body)
     if (typeof context?.interactionId !== 'string') return false
     const pending = this.pending.get(context.interactionId)
     if (!pending?.card || object(body?.bizInfoDTO)?.bizId !== pending.card.bizId) return false
-    if (uid(object(body?.operatorDTO)?.uid) !== pending.route.operatorUid) return false
+    const operator = object(body?.operatorDTO)
+    // 身份仅来自可信订阅的服务端 operatorDTO，绝不读取按钮 context 中的身份。
+    if (pending.route.operatorUid !== undefined) {
+      if (uid(operator?.uid) !== pending.route.operatorUid) return false
+    } else if (operator?.openDingTalkId !== pending.route.operatorOpenDingTalkId) return false
     if (Date.now() >= pending.expiresAt) {
       pending.finish('unavailable')
       return false
@@ -394,7 +429,7 @@ export class A2uiInteractions {
     if (
       !current ||
       current.bindingId !== pending.route.bindingId ||
-      current.operatorUid !== pending.route.operatorUid ||
+      identity(current) !== identity(pending.route) ||
       current.target.type !== pending.route.target.type ||
       current.target.id !== pending.route.target.id
     )

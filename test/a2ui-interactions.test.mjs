@@ -53,6 +53,56 @@ function event(card, action, overrides = {}) {
   }
 }
 
+// 按端上实际回调结构缩减，所有业务、会话和身份值均为测试数据。
+function atomicEvent(card, action, overrides = {}) {
+  return {
+    type: 'user_card_action_triggered',
+    payload: {
+      body: {
+        a2uiEvent: {
+          version: '1.0',
+          action: {
+            context: {
+              interactionId: card.interactionId,
+              action,
+              corpId: 'fixture-corp',
+              openDingTalkId: 'fixture-actor',
+              ...overrides,
+            },
+          },
+        },
+        bizInfoDTO: { bizId: card.bizId },
+        operatorDTO: { openDingTalkId: 'fixture-actor' },
+        conversationContextDTO: { openConversationId: 'fixture-conversation' },
+      },
+    },
+  }
+}
+
+test('真实原子回调 a2uiEvent + OpenDingTalkId 能恢复审批，动作上下文不是身份凭证', async (t) => {
+  const h = harness({
+    route: () => ({
+      target: { type: 'user', id: 'fixture-actor' },
+      operatorOpenDingTalkId: 'fixture-actor',
+      bindingId: 'binding-1',
+    }),
+  })
+  t.after(() => h.manager.close())
+  const result = h.manager.approve({ agent: h.agent, toolName: 'fixture' })
+  await ready()
+  assert.equal(h.sent.length, 1)
+  const callback = atomicEvent(h.sent[0], 'approve_once')
+  const wrongActor = structuredClone(callback)
+  wrongActor.payload.body.operatorDTO.openDingTalkId = 'another-actor'
+  assert.equal(h.manager.handleEvent('account-1', wrongActor), false)
+  const missingActor = structuredClone(callback)
+  delete missingActor.payload.body.operatorDTO
+  assert.equal(h.manager.handleEvent('account-1', missingActor), false)
+  assert.equal(h.manager.handleEvent('account-1', callback), true)
+  assert.equal(await result, 'allowed-once')
+  assert.equal(h.manager.handleEvent('account-1', callback), false)
+})
+
 test('原生审批由匹配卡片和操作人恢复一次，重复回调不再执行', async (t) => {
   const h = harness()
   t.after(() => h.manager.close())
@@ -77,6 +127,84 @@ test('原生审批由匹配卡片和操作人恢复一次，重复回调不再�
     h.updated[0].messages[0].updateComponents.components.some((c) => c.component === 'Button'),
     false,
   )
+})
+
+test('原子回调拒绝身份空间混用、授权变更和冲突动作格式', async (t) => {
+  let route = {
+    target: { type: 'user', id: 'fixture-actor' },
+    operatorOpenDingTalkId: 'fixture-actor',
+    bindingId: 'binding-1',
+  }
+  const h = harness({ route: () => route })
+  t.after(() => h.manager.close())
+  const result = h.manager.approve({ agent: h.agent, toolName: 'fixture' })
+  await ready()
+  const callback = atomicEvent(h.sent[0], 'reject')
+  const wrongNamespace = structuredClone(callback)
+  wrongNamespace.payload.body.operatorDTO = { uid: 'fixture-actor' }
+  assert.equal(h.manager.handleEvent('account-1', wrongNamespace), false)
+  const mixed = structuredClone(callback)
+  mixed.payload.body.actionData = { context: { interactionId: h.sent[0].interactionId, action: 'approve_once' } }
+  assert.equal(h.manager.handleEvent('account-1', mixed), false)
+  const malformed = event(h.sent[0], 'approve_once')
+  malformed.payload.body.operatorDTO = { openDingTalkId: 'fixture-actor' }
+  malformed.payload.body.a2uiEvent = null
+  assert.equal(h.manager.handleEvent('account-1', malformed), false)
+  const saved = structuredClone(route)
+  for (const change of [{ operatorOpenDingTalkId: 'changed' }, { bindingId: 'changed' }, { operatorUid: '123' }]) {
+    route = { ...saved, ...change }
+    assert.equal(h.manager.handleEvent('account-1', callback), false)
+  }
+  route = saved
+  assert.equal(h.manager.handleEvent('account-1', callback), true)
+  assert.equal(await result, 'rejected')
+})
+
+test('UID 路由不能以同值 OpenDingTalkId 回调授权，两种配置不可同时启用', async (t) => {
+  const h = harness()
+  t.after(() => h.manager.close())
+  const result = h.manager.approve({ agent: h.agent, toolName: 'fixture' })
+  await ready()
+  const callback = atomicEvent(h.sent[0], 'approve_once')
+  callback.payload.body.operatorDTO = { openDingTalkId: '123' }
+  assert.equal(h.manager.handleEvent('account-1', callback), false)
+  h.manager.close()
+  assert.equal(await result, 'cancelled')
+  const invalid = harness({
+    route: () => ({
+      target: { type: 'user', id: 'fixture' },
+      bindingId: 'binding-1',
+      operatorUid: '123',
+      operatorOpenDingTalkId: 'fixture-actor',
+    }),
+  })
+  t.after(() => invalid.manager.close())
+  assert.equal(await invalid.manager.approve({ agent: invalid.agent, toolName: 'fixture' }), 'unavailable')
+  assert.equal(invalid.sent.length, 0)
+})
+
+test('原子 ask 回调返回结构化答案，双格式答案冲突不恢复请求', async (t) => {
+  const h = harness({
+    route: () => ({
+      target: { type: 'user', id: 'fixture-actor' },
+      operatorOpenDingTalkId: 'fixture-actor',
+      bindingId: 'binding-1',
+    }),
+  })
+  t.after(() => h.manager.close())
+  const result = h.manager.ask('session-1', { questions: [{ id: 'note', question: '备注' }] })
+  await ready()
+  const callback = atomicEvent(h.sent[0], 'submit', { answers: { q0: { selected: [], custom: 'fixture answer' } } })
+  const mixed = structuredClone(callback)
+  mixed.payload.body.actionData = {
+    context: {
+      ...callback.payload.body.a2uiEvent.action.context,
+      answers: { q0: { selected: [], custom: 'different' } },
+    },
+  }
+  assert.equal(h.manager.handleEvent('account-1', mixed), false)
+  assert.equal(h.manager.handleEvent('account-1', callback), true)
+  assert.deepEqual(await result, { answers: [{ id: 'note', selected: [], custom: 'fixture answer' }] })
 })
 
 test('原生 ask 在一张卡片中组合单选、多选、自由文本并返回宿主标签', async (t) => {
