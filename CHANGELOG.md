@@ -4,4 +4,5 @@
 
 ## Unreleased
 
+- 优化 A2UI 卡片的 Markdown 标题、说明与分组；审批/问答结束后保留只读请求和答案回执，不再只显示一句状态文字。
 - 新增独立于数字员工的 A2UI approve / ask 通用交互模块；兼容原子卡片 `a2uiEvent.action.context` 回调，并按显式 UID 或 OpenDingTalkId 身份空间校验服务端操作人。默认运行时尚未接线。

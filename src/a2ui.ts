@@ -108,11 +108,57 @@ function componentMessages(surfaceId: string, components: Record<string, unknown
   return [{ version: 'v1.0', updateComponents: { surfaceId, components } }]
 }
 
-function approvalCard(surfaceId: string, id: string, tool: string, detail?: string): A2uiMessage[] {
+// 仅用于拼入标题的纯文本；正文 reason/detail 仍保留宿主提供的 Markdown。
+function markdownText(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/([\\`*_{}\[\]()#+.!|~-])/g, '\\$1')
+    .replace(/[\r\n]+/g, ' ')
+}
+
+function readOnlyCard(surfaceId: string, components: Record<string, unknown>[]): A2uiMessage[] {
   return componentMessages(surfaceId, [
-    { id: 'root', component: 'Column', children: ['title', 'detail', 'actions'] },
-    { id: 'title', component: 'Text', text: `批准 ${tool}？` },
-    { id: 'detail', component: 'Markdown', content: detail || `请求执行敏感工具：${tool}` },
+    { id: 'root', component: 'Column', gap: 12, children: components.map((c) => c.id) },
+    ...components,
+  ])
+}
+
+function terminalHeader(outcome: Terminal): Record<string, unknown>[] {
+  const [title, description] = {
+    'allowed-once': ['✅ 已批准', '仅授权本次操作，**不代表执行成功**。执行结果以宿主后续反馈为准。'],
+    rejected: ['⛔ 已拒绝', '本次请求未获授权。'],
+    cancelled: ['○ 已取消', '本次交互已结束，无需继续操作。'],
+    unavailable: ['⌛ 请求已失效', '本次请求无法继续处理，请在会话中重新发起。'],
+    answered: ['✅ 回答已提交', '已将以下回答交回当前请求；这不代表批准执行工具。'],
+  }[outcome]
+  return [
+    { id: 'title', component: 'Markdown', content: `## ${title}` },
+    { id: 'status', component: 'Markdown', content: description },
+  ]
+}
+
+function approvalDetails(tool: string, detail?: string): Record<string, unknown>[] {
+  return [
+    { id: 'tool', component: 'Text', text: `请求操作：${tool}` },
+    ...(detail ? [{ id: 'detail', component: 'Markdown', content: detail }] : []),
+  ]
+}
+
+function approvalCard(surfaceId: string, id: string, tool: string, detail?: string): A2uiMessage[] {
+  const details = approvalDetails(tool, detail)
+  return componentMessages(surfaceId, [
+    {
+      id: 'root',
+      component: 'Column',
+      gap: 12,
+      children: ['title', 'status', ...details.map((c) => c.id), 'hint', 'actions'],
+    },
+    { id: 'title', component: 'Markdown', content: '## 🔐 操作确认' },
+    { id: 'status', component: 'Markdown', content: '**等待你的确认** · 授权仅本次有效' },
+    ...details,
+    { id: 'hint', component: 'Markdown', content: '> 请先核对操作内容。不确定时可选择「拒绝」。' },
     { id: 'actions', component: 'Row', children: ['approve_once', 'reject'] },
     ...(['approve_once', 'reject'] as const).flatMap((action) => [
       {
@@ -128,15 +174,26 @@ function approvalCard(surfaceId: string, id: string, tool: string, detail?: stri
 }
 
 function questionCard(surfaceId: string, id: string, questions: readonly HostUserQuestionItem[]): A2uiMessage[] {
-  const children: string[] = []
-  const components: Record<string, unknown>[] = []
+  const children: string[] = ['title', 'status']
+  const components: Record<string, unknown>[] = [
+    { id: 'title', component: 'Markdown', content: '## 💬 需要你补充信息' },
+    {
+      id: 'status',
+      component: 'Markdown',
+      content: `共 **${questions.length}** 个问题 · 填写后统一提交；不确定的项目可留空。`,
+    },
+  ]
   const answers: Record<string, unknown> = {}
   for (const [index, question] of questions.entries()) {
     // 不把任意问题 ID 拼进 JSON Pointer；回传时再映射回宿主 ID。
     const key = `q${index}`
     answers[key] = { selected: [], custom: '' }
     children.push(`${key}_title`)
-    components.push({ id: `${key}_title`, component: 'Text', text: question.header || question.question })
+    components.push({
+      id: `${key}_title`,
+      component: 'Markdown',
+      content: `### ${index + 1}. ${markdownText(question.header || question.question)}`,
+    })
     if (question.header || question.detail) {
       children.push(`${key}_detail`)
       components.push({
@@ -169,7 +226,7 @@ function questionCard(surfaceId: string, id: string, questions: readonly HostUse
     components.push({
       id: `${key}_custom`,
       component: 'TextField',
-      label: question.options?.length ? '其他回答（可选）' : '请输入回答',
+      label: question.options?.length ? '补充说明（可选）' : '填写回答（可选）',
       variant: 'longText',
       value: { path: `/answers/${key}/custom` },
     })
@@ -196,9 +253,40 @@ function questionCard(surfaceId: string, id: string, questions: readonly HostUse
     components.push({ id: `${action}_label`, component: 'Text', text: action === 'submit' ? '提交回答' : '取消' })
   }
   return [
-    ...componentMessages(surfaceId, [{ id: 'root', component: 'Column', children }, ...components]),
+    ...componentMessages(surfaceId, [{ id: 'root', component: 'Column', gap: 12, children }, ...components]),
     { version: 'v1.0', updateDataModel: { surfaceId, path: '/', value: { answers } } },
   ]
+}
+
+function questionReceipt(
+  surfaceId: string,
+  outcome: Terminal,
+  questions: readonly HostUserQuestionItem[],
+  answer?: HostUserQuestionAnswer,
+): A2uiMessage[] {
+  const components = terminalHeader(outcome)
+  for (const [index, question] of questions.entries()) {
+    const key = `q${index}`
+    components.push({
+      id: `${key}_title`,
+      component: 'Markdown',
+      content: `### ${index + 1}. ${markdownText(question.header || question.question)}`,
+    })
+    if (question.header || question.detail)
+      components.push({
+        id: `${key}_detail`,
+        component: 'Markdown',
+        content: [question.question, question.detail].filter(Boolean).join('\n\n'),
+      })
+    if (outcome !== 'answered') continue
+    const value = answer?.answers[index]
+    if (value?.selected.length)
+      components.push({ id: `${key}_selected`, component: 'Text', text: `已选：${value.selected.join('、')}` })
+    if (value?.custom) components.push({ id: `${key}_answer`, component: 'Text', text: value.custom })
+    if (!value?.selected.length && !value?.custom)
+      components.push({ id: `${key}_empty`, component: 'Markdown', content: '*未填写*' })
+  }
+  return readOnlyCard(surfaceId, components)
 }
 
 function parseAnswers(value: unknown, questions: readonly HostUserQuestionItem[]): HostUserQuestionAnswer | undefined {
@@ -286,8 +374,12 @@ export class A2uiInteractions {
 
   async approve(request: HostApprovalRequest): Promise<HostApprovalOutcome> {
     const { toolName, reason } = request
-    const result = await this.start(request.agent.id, 'approval', request.signal, (surface, id) =>
-      approvalCard(surface, id, toolName, reason),
+    const result = await this.start(
+      request.agent.id,
+      'approval',
+      request.signal,
+      (surface, id) => approvalCard(surface, id, toolName, reason),
+      (surface, outcome) => readOnlyCard(surface, [...terminalHeader(outcome), ...approvalDetails(toolName, reason)]),
     )
     return result.outcome === 'answered' ? 'unavailable' : result.outcome
   }
@@ -307,6 +399,7 @@ export class A2uiInteractions {
       'ask',
       request.signal,
       (surface, id) => questionCard(surface, id, questions),
+      (surface, outcome, answers) => questionReceipt(surface, outcome, questions, answers),
       questions,
     )
     if (result.outcome === 'answered' && result.answers) return result.answers
@@ -320,6 +413,7 @@ export class A2uiInteractions {
     kind: 'approval' | 'ask',
     signal: AbortSignal | undefined,
     render: (surfaceId: string, id: string) => A2uiMessage[],
+    renderTerminal: (surfaceId: string, outcome: Terminal, answers?: HostUserQuestionAnswer) => A2uiMessage[],
     questions: readonly HostUserQuestionItem[] = [],
   ): Promise<Result> {
     if (this.closed || signal?.aborted) return Promise.resolve({ outcome: 'cancelled' })
@@ -336,23 +430,12 @@ export class A2uiInteractions {
     return new Promise((resolve) => {
       const delivery = new AbortController()
       let finished: Terminal | undefined
+      let receiptAnswers: HostUserQuestionAnswer | undefined
       const repaint = () => {
         if (!pending.card || !finished) return
-        const text = {
-          'allowed-once': '已批准本次操作（不代表执行成功）',
-          rejected: '已拒绝',
-          cancelled: '已取消',
-          unavailable: '请求已失效',
-          answered: '回答已提交',
-        }[finished]
+        const messages = renderTerminal(pending.card.surfaceId, finished, receiptAnswers)
         void Promise.resolve()
-          .then(() =>
-            this.options.transport.update(
-              pending.card!,
-              componentMessages(pending.card!.surfaceId, [{ id: 'root', component: 'Text', text }]),
-              AbortSignal.timeout(10_000),
-            ),
-          )
+          .then(() => this.options.transport.update(pending.card!, messages, AbortSignal.timeout(10_000)))
           .catch(() => this.options.log?.('a2ui_terminal_update_failed'))
       }
       const onAbort = () => pending.finish('cancelled')
@@ -366,6 +449,7 @@ export class A2uiInteractions {
         finish: (outcome, answers) => {
           if (finished) return
           finished = outcome
+          receiptAnswers = answers ? structuredClone(answers) : undefined
           this.pending.delete(id)
           clearTimeout(timer)
           signal?.removeEventListener('abort', onAbort)

@@ -40,6 +40,72 @@ async function ready() {
   await new Promise((resolve) => setImmediate(resolve))
 }
 
+test('审批等待和终态保留 Markdown 层次、请求正文及安全提示，不再退化成一句文字', async (t) => {
+  const h = harness()
+  t.after(() => h.manager.close())
+  const result = h.manager.approve({ agent: h.agent, toolName: 'fixture_tool', reason: '**变更内容**\n\n- 只读检查' })
+  await ready()
+  const pending = h.sent[0].messages[0].updateComponents.components
+  assert.ok(pending.some((c) => c.component === 'Markdown' && c.content.includes('等待你的确认')))
+  assert.equal(h.manager.handleEvent('account-1', event(h.sent[0], 'approve_once')), true)
+  assert.equal(await result, 'allowed-once')
+  await ready()
+  const completed = h.updated[0].messages[0].updateComponents.components
+  assert.equal(completed.find((c) => c.id === 'root').component, 'Column')
+  const markdown = completed
+    .filter((c) => c.component === 'Markdown')
+    .map((c) => c.content)
+    .join('\n')
+  assert.match(markdown, /## ✅ 已批准/)
+  assert.match(markdown, /\*\*变更内容\*\*/)
+  assert.match(markdown, /不代表执行成功/)
+  assert.ok(completed.some((c) => c.component === 'Text' && c.text.includes('fixture_tool')))
+  assert.equal(
+    completed.some((c) => ['Button', 'TextField', 'ChoicePicker'].includes(c.component)),
+    false,
+  )
+})
+
+test('ask 完成保留问题与答案，空答案明确标记，自由文本不能注入 Markdown', async (t) => {
+  const h = harness()
+  t.after(() => h.manager.close())
+  const custom = '<a atId="all">@所有人</a> **not a heading**'
+  const result = h.manager.ask('session-1', {
+    questions: [
+      { id: 'mode', header: '模式', question: '选择模式', options: [{ label: '安全' }] },
+      { id: 'note', question: '补充说明' },
+      { id: 'empty', question: '可跳过' },
+    ],
+  })
+  void result.catch(() => {}) // 测试断言失败后的清理取消也必须被消费。
+  await ready()
+  const initial = h.sent[0].messages[0].updateComponents.components
+  assert.ok(initial.some((c) => c.component === 'Markdown' && c.content.includes('需要你补充信息')))
+  const answers = {
+    q0: { selected: ['option_0'], custom: '' },
+    q1: { selected: [], custom },
+    q2: { selected: [], custom: '' },
+  }
+  assert.equal(h.manager.handleEvent('account-1', event(h.sent[0], 'submit', { answers })), true)
+  const answer = await result
+  answer.answers[0].selected[0] = '宿主后续修改'
+  await ready()
+  const completed = h.updated[0].messages[0].updateComponents.components
+  const markdown = completed
+    .filter((c) => c.component === 'Markdown')
+    .map((c) => c.content)
+    .join('\n')
+  assert.match(markdown, /## ✅ 回答已提交/)
+  assert.ok(completed.some((c) => c.component === 'Text' && c.text === '已选：安全'))
+  assert.match(markdown, /未填写/)
+  assert.doesNotMatch(markdown, /宿主后续修改|<a atId|\*\*not a heading\*\*/)
+  assert.ok(completed.some((c) => c.component === 'Text' && c.text === custom))
+  assert.equal(
+    completed.some((c) => ['Button', 'TextField', 'ChoicePicker'].includes(c.component)),
+    false,
+  )
+})
+
 function event(card, action, overrides = {}) {
   return {
     type: 'user_card_action_triggered',
