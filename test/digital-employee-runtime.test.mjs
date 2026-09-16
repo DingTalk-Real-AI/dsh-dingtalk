@@ -3,6 +3,7 @@ import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/pr
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
+import { Context } from '@deepseek-ai/cordis'
 
 import { authorizeDigitalEmployeeEvent, DwsDigitalEmployeeSource } from '../lib/digital-employee-runtime.js'
 import { apply } from '../lib/index.js'
@@ -29,6 +30,8 @@ const employee = {
 
 async function writeFakeDwsCommand(root, name, source, pathCommand = false) {
   if (pathCommand) {
+    // 仓库内 TMPDIR 会继承 ESM；无扩展名的 fake CLI 仍应按 CommonJS 执行。
+    await writeFile(path.join(root, 'package.json'), JSON.stringify({ type: 'commonjs' }))
     const command = path.join(root, name)
     await writeFile(command, source, { mode: 0o755 })
     await chmod(command, 0o755)
@@ -38,6 +41,34 @@ async function writeFakeDwsCommand(root, name, source, pathCommand = false) {
   await writeFile(script, source, 'utf8')
   return { dwsCommand: process.execPath, dwsArgsPrefix: [script] }
 }
+
+test('已通过信号退出的 Consumer 在启动失败后仍能完成 stop', { skip: process.platform === 'win32' }, async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-signaled-'))
+  const invocation = await writeFakeDwsCommand(
+    root,
+    'signal-exit',
+    "process.stderr.write('retryable=false\\n', () => process.kill(process.pid, 'SIGTERM'))\n",
+  )
+  const runtime = new DwsDigitalEmployeeSource({
+    employee,
+    stateDir: path.join(root, 'state'),
+    ...invocation,
+    log() {},
+    onMessage() {},
+  })
+  runtime.replySink.probe = async () => {}
+  t.after(async () => {
+    await runtime.stop()
+    await rm(root, { recursive: true, force: true })
+  })
+  await assert.rejects(runtime.start(), /event_consumer_exited_before_ready/)
+  const stopped = await Promise.race([
+    runtime.stop().then(() => true),
+    new Promise((resolve) => setTimeout(() => resolve(false), 200)),
+  ])
+  assert.equal(stopped, true, 'close 已发生，stop 不应再次等待同一 close 事件')
+  assert.equal(runtime.currentStatus().state, 'stopped')
+})
 
 test('本地白名单分别覆盖 operator、额外私聊、群白名单和默认拒绝', () => {
   const base = {
@@ -78,7 +109,14 @@ async function createFakeDws(root, pathCommand = false) {
 const fs = require('node:fs')
 const record = process.env.FAKE_DWS_RECORD
 const args = process.argv.slice(2)
-const operation = args.includes('capabilities') ? 'capabilities' : args.includes('reply') ? 'reply' : args.includes('operator-private') ? 'operator-private' : args.includes('consume') ? 'consume' : 'unknown'
+if (args.includes('--local-lease')) {
+  process.stderr.write('[employee] leased\\n')
+  process.stdin.resume()
+  process.stdin.on('end', () => process.exit(0))
+  process.on('SIGTERM', () => process.exit(0))
+  return
+}
+const operation = args.includes('binding') ? 'binding' : args.includes('capabilities') ? 'capabilities' : args.includes('reply') ? 'reply' : args.includes('operator-private') ? 'operator-private' : args.includes('consume') ? 'consume' : 'unknown'
 fs.appendFileSync(record, JSON.stringify({ operation, args, credentialEnvKeys: Object.keys(process.env).filter((key) => /TOKEN|AUTH_?CODE|CLIENT_?SECRET|PASSWORD|CREDENTIAL/i.test(key)) }) + '\\n')
 if (operation === 'capabilities') {
   process.stdout.write(JSON.stringify({ ok: true, outcome: 'success', data: { schemaVersion: 1, protocolVersion: 1, auditMode: 'local_required', capabilities: { eventConsume: true, replyStdin: true, operatorPrivateStdin: true } }, meta: {} }))
@@ -111,6 +149,10 @@ if (operation === 'consume') {
   process.stdin.on('data', (chunk) => { input += chunk })
   process.stdin.on('end', () => {
     const value = input ? JSON.parse(input) : {}
+    if (operation === 'binding') {
+      process.stdout.write(JSON.stringify({ ok: true, outcome: 'success', data: { agentUuid: value.agentUuid, dwsProfile: args[args.indexOf('--profile') + 1], bindingRevision: value.bindingRevision, channel: 'dsh', bindingState: 'bound', desiredState: 'running' } }))
+      return
+    }
     const openMessageId = process.env.FAKE_DWS_EMPTY_RECEIPT === '1' ? '' : operation === 'reply' ? 'outgoing-1' : 'operator-message-1'
     process.stdout.write(JSON.stringify({ ok: true, outcome: 'success', data: { openMessageId, conversationId: value.conversationId || 'operator-conversation', deliveryStatus: 'delivered', idempotencyKey: value.idempotencyKey }, meta: {} }))
   })
@@ -211,14 +253,16 @@ if (args.includes('consume')) {
 }
 
 function createHost() {
+  const lifecycle = new Context()
   const handlers = new Map()
   const agents = new Map()
   const followups = []
   const sessions = []
   const emit = (name, ...args) => {
-    for (const handler of handlers.get(name) ?? []) handler(...args)
+    return Promise.all((handlers.get(name) ?? []).map((handler) => handler(...args)))
   }
   const ctx = {
+    effect: (...args) => lifecycle.effect(...args),
     credentials: { resolve: async () => undefined },
     agentDefaultModel: { currentSelection: () => ({ provider: 'test', model: 'model' }) },
     agents: {
@@ -275,7 +319,7 @@ function createHost() {
       return () => list.splice(list.indexOf(handler), 1)
     },
   }
-  return { ctx, followups, sessions, dispose: () => emit('dispose') }
+  return { ctx, followups, sessions, dispose: () => lifecycle.fiber.dispose() }
 }
 
 function pluginConfig(workspace, digitalEmployees) {
@@ -655,7 +699,7 @@ test(
     process.env.DSH_DINGTALK_STATE_DIR = stateDir
     const hosts = []
     t.after(async () => {
-      for (const host of hosts) host.dispose()
+      for (const host of hosts) await host.dispose()
       await new Promise((resolve) => setTimeout(resolve, 20))
       if (originalPath === undefined) delete process.env.PATH
       else process.env.PATH = originalPath
@@ -687,7 +731,7 @@ test(
     assert.equal(new Set(first.followups.map((item) => item.sessionId)).size, 2)
     assert.ok(first.followups.every((item) => item.message.content[0].text === '只应通过 stdin 回复的正文'))
 
-    first.dispose()
+    await first.dispose()
     await new Promise((resolve) => setTimeout(resolve, 50))
     const beforeRestart = (await readFile(recordFile, 'utf8'))
       .split('\n')

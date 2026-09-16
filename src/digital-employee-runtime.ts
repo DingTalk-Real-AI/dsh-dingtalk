@@ -106,6 +106,7 @@ function normalizeInbound(event: DigitalEmployeeEvent): InboundMessage {
 
 export class DwsDigitalEmployeeSource implements InboundSource {
   private child?: ChildProcessWithoutNullStreams
+  private readonly childClosed = new WeakMap<ChildProcessWithoutNullStreams, Promise<void>>()
   private stopped = false
   private status: DigitalEmployeeRuntimeStatus = { state: 'probing', observedAt: Date.now() }
   private readonly ledger: DigitalEmployeeLedger
@@ -161,6 +162,7 @@ export class DwsDigitalEmployeeSource implements InboundSource {
     const child = this.child
     this.child = undefined
     if (child) await this.terminateChild(child)
+    await this.eventChain
     this.updateStatus({ state: 'stopped' })
   }
 
@@ -196,6 +198,8 @@ export class DwsDigitalEmployeeSource implements InboundSource {
       env: sanitizedDwsEnvironment(process.env),
     })
     this.child = child
+    // 从创建时记录 close；信号退出的 exitCode 仍为 null，不能重新等待已发出的事件。
+    this.childClosed.set(child, new Promise<void>((resolve) => child.once('close', () => resolve())))
     let stdoutBuffer = ''
     let stderrBuffer = ''
     let ready = false
@@ -315,6 +319,7 @@ export class DwsDigitalEmployeeSource implements InboundSource {
   }
 
   private async handleEvent(event: DigitalEmployeeEvent): Promise<void> {
+    if (this.stopped) return
     if (this.ledger.hasEvent(event.eventId) || this.ledger.hasSentMessage(event.messageId)) return
     const allowed = authorizeDigitalEmployeeEvent(this.options.employee, event)
     if (!allowed) {
@@ -326,6 +331,7 @@ export class DwsDigitalEmployeeSource implements InboundSource {
     await this.replySink.audit({ eventId: event.eventId, operationType: 'access_check', status: 'accepted' })
     await this.replySink.waitForPendingReplies(event.conversationId)
     if (this.ledger.hasEvent(event.eventId) || this.ledger.hasSentMessage(event.messageId)) return
+    if (this.stopped) return
     if (this.status.state === 'failed') throw new Error('digital_employee_fail_closed')
     this.ledger.markEvent(event.eventId)
     this.updateStatus({ state: 'ready', lastEventAt: Date.now() })
@@ -344,15 +350,26 @@ export class DwsDigitalEmployeeSource implements InboundSource {
   }
 
   private async terminateChild(child: ChildProcessWithoutNullStreams): Promise<void> {
-    if (child.exitCode !== null) return
-    const closed = new Promise<void>((resolve) => child.once('close', () => resolve()))
-    child.stdin.end()
-    await Promise.race([closed, new Promise<void>((resolve) => setTimeout(resolve, 1_000))])
-    if (child.exitCode === null) {
-      child.kill('SIGTERM')
-      // 不使用 SIGKILL；等待确认旧订阅进程真实退出后才允许重试或完成 stop。
+    const closed = this.childClosed.get(child)
+    if (!closed) throw new Error('untracked_event_consumer')
+    if (child.exitCode !== null || child.signalCode !== null) {
       await closed
+      return
     }
+    child.stdin.end()
+    let timer: ReturnType<typeof setTimeout> | undefined
+    await Promise.race([
+      closed,
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, 1_000)
+      }),
+    ])
+    if (timer) clearTimeout(timer)
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill('SIGTERM')
+    }
+    // 不使用 SIGKILL；仍等待进程及 stdio 真正关闭后才允许重试或完成 stop。
+    await closed
   }
 
   private startHeartbeat(): void {

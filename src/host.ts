@@ -72,7 +72,7 @@ export interface HostAgent {
   cancel(cause: { readonly kind: 'user' }, options?: { keepInbox?: boolean }): void
 }
 
-/** Owned handle returned by create/resume; disposing stops and unregisters the agent. */
+/** Owned handle returned by create/resume; idempotent dispose cancels, drains and unregisters this agent. */
 export interface AgentHandle {
   readonly agent: HostAgent
   dispose(): Promise<void>

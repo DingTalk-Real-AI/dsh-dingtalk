@@ -4,6 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
+import { Context } from '@deepseek-ai/cordis'
 
 import { DWClient, TOPIC_ROBOT } from 'dingtalk-stream'
 import { apply } from '../lib/index.js'
@@ -45,6 +46,7 @@ function baseConfig(workspace, access) {
 }
 
 function createHost(workspace) {
+  const lifecycle = new Context()
   const eventHandlers = new Map()
   const agents = new Map()
   const created = []
@@ -105,6 +107,7 @@ function createHost(workspace) {
     },
   }
   const ctx = {
+    effect: (...args) => lifecycle.effect(...args),
     agents: registry,
     agentDefaultModel: { currentSelection: () => ({ provider: 'test', model: 'model' }) },
     credentials: { resolve: async () => undefined },
@@ -131,7 +134,7 @@ function createHost(workspace) {
     ctx,
     created,
     followups,
-    dispose: () => emit('dispose'),
+    dispose: () => lifecycle.fiber.dispose(),
   }
 }
 
@@ -153,7 +156,7 @@ function delivery(messageId, senderStaffId, conversationId, conversationType = '
 }
 
 test('公开插件运行时执行发送者和群策略，并按群成员隔离会话', async (t) => {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-dingtalk-runtime-access-'))
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-access-'))
   const originalStateDir = process.env.DSH_DINGTALK_STATE_DIR
   const originalFetch = globalThis.fetch
   const originalConnect = DWClient.prototype.connect
@@ -165,7 +168,7 @@ test('公开插件运行时执行发送者和群策略，并按群成员隔离�
   const sent = []
 
   t.after(async () => {
-    for (const host of runtimeHosts) host.dispose()
+    for (const host of runtimeHosts) await host.dispose()
     if (originalStateDir === undefined) delete process.env.DSH_DINGTALK_STATE_DIR
     else process.env.DSH_DINGTALK_STATE_DIR = originalStateDir
     globalThis.fetch = originalFetch
