@@ -9,6 +9,10 @@
     ".": {
       "types": "./lib/index.d.ts",
       "import": "./lib/index.js"
+    },
+    "./a2ui": {
+      "types": "./lib/a2ui.d.ts",
+      "import": "./lib/a2ui.js"
     }
   },
   "bin": {

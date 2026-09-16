@@ -182,6 +182,12 @@ pnpm config get registry
 
 第一版只支持 DSH `web` profile。macOS 和 Linux 为正式支持平台，Windows 为实验性平台。
 
+### A2UI 原子交互模块（接入开发中）
+
+包内提供独立于数字员工生命周期的 `@dingtalk-real-ai/dsh-dingtalk/a2ui` 模块，支持组合 approve / ask
+卡片、校验 `user_card_action_triggered` 回调并恢复原生请求。**默认运行时尚未接线，升级不会自动启用**；
+真实发卡、事件订阅、身份映射和端上验证仍需接入方完成。详见 [接口、限制与验收说明](docs/a2ui-interactions.md)。
+
 ## 命令
 
 按推荐的 `npx` 方式安装后，请使用以下命令：
