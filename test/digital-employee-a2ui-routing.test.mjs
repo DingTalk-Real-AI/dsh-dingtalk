@@ -13,7 +13,12 @@ test('显式卡片订阅直接走控制回调，不进入普通消息/模型队�
     `
     require('node:assert/strict').ok(process.argv.includes('user_card_action_triggered'))
     process.stderr.write('[event] ready\\n')
-    setTimeout(() => process.stdout.write(JSON.stringify({type:'user_card_action_triggered',payload:{body:{}}})+'\\n'), 40)
+    setTimeout(() => {
+      const bytes = Buffer.from(JSON.stringify({type:'user_card_action_triggered',payload:{body:{note:'验收备注'}}})+'\\n')
+      const split = bytes.indexOf(Buffer.from('验')) + 1
+      process.stdout.write(bytes.subarray(0, split))
+      setTimeout(() => process.stdout.write(bytes.subarray(split)), 20)
+    }, 40)
     process.stdin.resume()
   `,
   )
@@ -39,6 +44,7 @@ test('显式卡片订阅直接走控制回调，不进入普通消息/模型队�
     },
     onCardAction(event) {
       assert.equal(event.type, 'user_card_action_triggered')
+      assert.equal(event.payload.body.note, '验收备注')
       cards++
     },
   })

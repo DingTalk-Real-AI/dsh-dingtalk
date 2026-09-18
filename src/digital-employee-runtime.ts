@@ -254,8 +254,8 @@ export class DwsDigitalEmployeeSource implements InboundSource {
         .then(() => this.handleEvent(parseEvent(value)))
         .catch((error) => this.options.log(`event rejected (${error instanceof Error ? error.message : 'unknown'})`))
     }
-    const drain = (chunk: Buffer, stream: 'stdout' | 'stderr') => {
-      let buffer = (stream === 'stdout' ? stdoutBuffer : stderrBuffer) + chunk.toString('utf8')
+    const drain = (chunk: string, stream: 'stdout' | 'stderr') => {
+      let buffer = (stream === 'stdout' ? stdoutBuffer : stderrBuffer) + chunk
       for (;;) {
         const index = buffer.indexOf('\n')
         if (index < 0) break
@@ -279,8 +279,11 @@ export class DwsDigitalEmployeeSource implements InboundSource {
       if (stream === 'stdout') stdoutBuffer = buffer
       else stderrBuffer = buffer
     }
-    child.stdout.on('data', (chunk: Buffer) => drain(chunk, 'stdout'))
-    child.stderr.on('data', (chunk: Buffer) => drain(chunk, 'stderr'))
+    // 流式解码保留跨 chunk 的 UTF-8 字节，避免中文表单回答被替换成乱码。
+    child.stdout.setEncoding('utf8')
+    child.stderr.setEncoding('utf8')
+    child.stdout.on('data', (chunk: string) => drain(chunk, 'stdout'))
+    child.stderr.on('data', (chunk: string) => drain(chunk, 'stderr'))
 
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
