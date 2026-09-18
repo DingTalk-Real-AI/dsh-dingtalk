@@ -1,0 +1,206 @@
+# A2UI approve / ask：独立于数字员工的交互模块
+
+## 状态和范围
+
+通用模块通过同一 NPM 包的 `@dingtalk-real-ai/dsh-dingtalk/a2ui` 子路径提供，不拆分 SDK。
+数字员工默认运行流程已接线：`interactionMode` 默认为 `auto`，兼容 DWS 上优先使用 A2UI；不需要员工 UUID 环境变量。
+机器人无 DWS／可信 OpenDingTalkId 路由时仍使用原模板卡片与文字流程，不猜测身份转换。
+
+已实现原子卡片生成、DSH 原生请求接管、回调校验、单次恢复、显式终态更新，以及超时、取消、卸载处理。
+内置数字员工适配器实现 DWS 发卡、更新、回调订阅及可信配置路由。当前新增接线通过模拟 DWS 子进程与真实 Cordis 调度验证，
+本次默认接线与降级尚未做新版真实组织端到端验收，不将此前独立夹具的实机结果当作本次完整验收。
+
+## 与 PR #20 的关系
+
+本改造基于 main `05b8d6cbe7f8a392e9af32fc79819112fcb4ad0b`，不依赖
+[PR #20](https://github.com/DingTalk-Real-AI/dsh-dingtalk/pull/20)
+的 `9784e08e47b623a5223488bccf17728473ca064e`。
+main 已有原生 `approval/request`、`user-questions/request` 类型与处理机制。
+#20 的增量负责数字员工 runtime 生命周期、租约、换绑和释放，不是 A2UI 卡片协议。
+
+本 PR 直接接入 main 已有的数字员工流程，不引入 #20 的启停、租约、换绑或 Web 会话恢复改造。
+保留 #20 独立交付，不把测试版 DWS 当作官方已发布能力；当前注册协议仍为 v1，配置变更需重启连接器。
+
+## 默认选择与安全降级
+
+根级配置 `interactionMode: auto`（默认）或 `interactionMode: text`（强制文字）。此项控制数字员工交互，
+不改变普通模型回复格式或机器人的原有模板卡片配置。
+
+- 启动时只读检查同一 DWS/Profile 的发卡、更新命令 Help、必要参数与卡片事件。
+  需要 `send-a2ui-card --summary`，以及 `--content`、`--a2ui-annotations`、用户/群目标、更新状态与业务 ID 参数。
+- 能力缺失、Help 无法确认、明确配置 text：不尝试发卡，使用原会话文字提问／operator 私聊确认码。
+- 首次卡片订阅未 ready：确认旧消费进程退出后，仅启动消息订阅并降级文字；不会并行留下两条消费者。
+- 订阅曾 ready 后掉线、发卡失败／超时／缺失唯一业务 ID：不重发卡片、不切换文字或 Web 授权；本次请求失败或等待至超时。
+- 卡片拒绝、取消、超时、撤权或终态更新失败：不降级、不重复恢复；文字降级也处理 AbortSignal、超时、关闭和并发冲突。
+- 审批卡片发给配置的 operator；ask 发原私聊提问人或原群，回调只接受原提问人。每次审批写本地元数据审计，审计失败不放行。
+
+Help 探测只证明 CLI 支持；订阅 ready 只证明连接已建立，均不等于目标客户端能渲染或服务端发卡已授权。
+若运行中遇到服务端不兼容，可将 `interactionMode` 改为 `text` 并重启，再重新发起请求；旧卡片不自动恢复。
+
+## 接口与职责
+
+`A2uiInteractions` 只有请求、安装、事件处理和关闭这几类入口：
+
+- `install(agentCtx)`：接管该 Agent 的原生 approve / ask，返回幂等卸载函数；不接管其他 Agent。
+- `approve(request)`：允许一次返回 `allowed-once`，拒绝返回 `rejected`；未知身份、超时、发送失败返回 `unavailable`。
+- `ask(sessionId, request)`：返回宿主格式 `{ answers: [{ id, selected, custom? }] }`；取消抛 `AbortError`，失效抛错误。
+- `handleEvent(source, event)`：同步处理可信来源的卡片事件，不进入正在等待答案的会话队列。
+- `close()`：结束等待并卸载监听；未完成请求不会自动恢复。
+
+通用模块直接 `install` 时应独占 approve / ask。内置适配器不直接调用它的 `install`，
+而在 Agent 范围内统一分流：仅在发卡前确认能力不可用时把原请求交给文字管理器，否则由 A2UI 独占处理。
+两个入口都优先于 Web 回答器，并幂等安装；不会因一次发卡错误再次触发原请求或另一个授权渠道。
+本模块使用原生请求，不覆盖旧机器人的 `ask_user_question` tool shadow。
+
+接入方注入两个真实变化的接口：
+
+1. `route(sessionId, kind)`：从可信配置返回目标、允许操作人的身份和 `bindingId`。
+   `operatorUid` 与 `operatorOpenDingTalkId` 必须二选一，分别匹配服务端 `operatorDTO` 的同名身份空间，不能混用。
+   approve 必须选已验证的管理员；ask 通常选提问对象。无法解析就返回 `undefined`，不可默认拿发送者当审批人。
+   `bindingId` 是接入方的授权版本标识，撤权或换绑后必须变化，不能复用旧值。
+   每次回调重新读取路由，校验目标、操作人及授权版本；已经改变的绑定无法批准旧请求。
+2. `transport.create/update`：创建、投递、更新卡片，处理身份凭据、网络超时和授权策略。
+   `create` 得到真实 Surface 后调用 `input.render(surfaceId)`，按顺序发送消息数组，
+   只有真实创建并投递成功才能返回 `{ bizId, surfaceId }`。禁止把 request ID 当卡片业务 ID，
+   或随意编造 Surface ID。`target.id` 使用传输约定的 ID 空间，不跨 staffId / UID / OpenDingTalkId 猜测转换。
+   `create` 的 `input.presentation` 和 `update` 的第四个参数提供显式交互状态、固定摘要及摘要组件 ID。
+   `update` 接收终态组件消息，传输层还要设置对应卡片流转状态。
+   若创建接口只能使用默认处理中状态，可实现可选的 `setWaiting(card, presentation, signal)`：
+   创建返回且回调路由登记后同步等待态；只能更新摘要组件，不能重发初始表单数据。
+   同一卡片的等待态与终态更新应串行，等待态更新失败不取消原请求。
+   两个方法必须遵守 AbortSignal；不做无条件发卡重试，不承诺 exactly-once。
+
+通用模块自定义接线示意（内置员工适配见 `src/digital-employee-a2ui.ts`）：
+
+```ts
+import { A2uiInteractions } from '@dingtalk-real-ai/dsh-dingtalk/a2ui'
+
+const interactions = new A2uiInteractions({
+  source: subscriptionIdentity,
+  timeoutMs: 300_000,
+  route: trustedRoute,
+  transport: cardTransport,
+  log,
+})
+const uninstall = interactions.install(agentCtx)
+
+// 在通过授权和来源校验的订阅入口调用，不把 source 从事件 context 中取出。
+interactions.handleEvent(subscriptionIdentity, event)
+// 单个 Agent 卸载时调用 uninstall()；整个实例关闭时调用 interactions.close()。
+```
+
+## 卡片与回调契约
+
+approve：`Column` + `Text` + `Markdown` + `Row` + 两个 `Button`。
+ask：`Column` + `Text` / `Markdown` + `ChoicePicker`（单选或多选）+ `TextField` + 提交/取消按钮。
+只发 `updateComponents` 和 `updateDataModel`，不假设客户端可以自行创建 Surface。
+
+动作名为连接器自定义的 `dsh.interaction`，不是平台事件名。平台事件为
+`user_card_action_triggered`，当前适配的字段位置是：
+
+```text
+payload.body.bizInfoDTO.bizId
+payload.body.operatorDTO.openDingTalkId  # operatorOpenDingTalkId 路由
+payload.body.a2uiEvent.action.context.interactionId
+payload.body.a2uiEvent.action.context.action
+payload.body.a2uiEvent.action.context.answers  # 仅 ask submit
+```
+
+兼容旧的 `payload.body.actionData.context` 格式，以及显式配置 `operatorUid` 路由时的
+`payload.body.operatorDTO.uid`。两种动作格式同时存在时，interactionId、action 和 answers 必须一致；
+畸形新格式不降级到旧格式。动作格式和身份空间分别校验，不将一种身份当作另一种身份的替代值。
+
+`operatorDTO.uid` 只接受数字字符串或安全整数；64 位 UID 若已经被普通 JSON.parse 截断，拒绝处理，
+由接入方使用无损解析保留字符串。`createUid`、客户端自报身份或问题定义不能代替服务端操作人和本地请求快照。
+`source` 必须来自可信订阅上下文，本模块不是 Webhook 的验签或认证层，不能将裸公网请求直接交给它。
+
+每个请求生成独立随机 `interactionId`；回调还要同时匹配业务卡片 ID 和操作人。
+首个有效终态赢得决定；重复、过期、重启前和未知请求的回调全部拒绝。
+发卡返回前无法核对业务卡片 ID，此时回调拒绝处理，需要用户再次点击；不缓存未验证的早到批准。
+
+ask 使用 `q0` 等内部表单键和 `option_0` 等选项 ID，避免任意问题 ID 进入 JSON Pointer。
+提交按钮通过 `answers: { path: '/answers' }` 一次性读取表单。接收后根据保存的请求映射回原问题 ID 和宿主选项标签。
+当前宿主问题契约允许跳过，空答案合法；本模块不凭空添加必填约束。如扩展必填，校验必须放在提交按钮 `checks`，
+并同步做服务端校验，不能依赖 `TextField.checks`。
+
+ask 仅补充信息，包括 Plan Review；它不是宿主工具执行授权，不会返回 `allowed-once`。
+不依赖 `wantResponse` 或 `responsePath` 自动回写。等待态使用 Markdown 标题、状态提示、说明和分组，
+通过 Column 的 `gap` 控制间距。决定完成后将根组件更新为只读回执，移除可达的按钮、选择器和输入框，
+保留请求说明；ask 提交后逐题展示选择、补充文字，空答案明确标记“未填写”。
+取消、拒绝和失效也保留原请求上下文，不将整个卡片压缩成一句状态文字。
+动态标题转义后进入 Markdown；工具名、选项回执和自由回答使用 Text，避免输入被解释成 Markdown 或钉钉 @ 标签。
+宿主显式提供的 reason/detail 继续支持 Markdown。答案回执持有独立快照，不受宿主后续修改返回值影响。
+“已批准”不代表工具执行成功。状态更新失败只记通用错误，不改变已作出的决定，不重复恢复宿主。
+
+### 会话摘要与等待状态
+
+参考 [Codex App Server 的线程状态与审批请求](https://learn.chatgpt.com/docs/app-server)，
+区分“等待用户操作”和“模型正在工作”，不通过是否存在最终产物来判断交互状态。
+以下中文文案是连接器的本地化设计，并非 Codex 官方文案。
+
+| 交互状态     | 摘要                             | 本地 DWS 适配流转状态 |
+| ------------ | -------------------------------- | --------------------- |
+| 等待审批     | 等待你的确认                     | CONFIRMING            |
+| 带选项的问答 | 等待你选择或填写                 | CONFIRMING            |
+| 纯输入问答   | 等待你填写回答                   | CONFIRMING            |
+| 回答提交     | 回答已提交                       | FINISH                |
+| 本次批准     | 已批准本次操作（不代表执行成功） | CONFIRMED             |
+| 拒绝 / 取消  | 已拒绝本次操作 / 已取消          | ABORTED               |
+| 超时         | 等待超时，请重新发起             | TIMEOUT               |
+| 不可用       | 请求已失效，请重新发起           | ERROR                 |
+
+卡片 `title` Markdown 组件承载 `titleMarkdown`（单题的问题标题、多题引导或简短终态）；
+创建时的固定 `summary` 独立用于会话摘要。等待态同步保留标题，不能再用摘要覆盖问题。
+创建和每次更新均传递指向标题的 `artifact` 注解，不把整张问答卡片或用户答案标成产物。
+客户端若优先使用 artifact，也可能显示问题标题；不能保证它始终使用创建时的 summary。
+超时对宿主仍返回 `unavailable`，不改变授权契约。
+DWS 当前创建接口固定 PROCESSING，因此投递后需再更新为 CONFIRMING，期间可能短暂显示处理中。
+客户端 lastMessage 是否采用摘要、是否优先显示流转状态，需实机验收；这不是一个直接设置 lastMessage 的 API。
+
+内置员工适配要求 DWS `send-a2ui-card` 支持 `--summary`，创建时显式传入上述固定等待文案。
+旧 DWS 把组件 JSON 拼入 `summary`，仅增加 artifact 注解不能解决会话列表泄露协议正文的问题。
+配套 DWS 修复使用“交互卡片”作为默认摘要；不支持该参数的版本自动使用文字，不把组件 JSON 再次暴露为摘要。
+本 PR 不修改或发布 DWS；不能据此宣称官方 DWS 已支持该参数。
+当前服务端 `update_a2ui_card` 的公开工具 Schema 不包含 `summary`，因此更新仍只修改组件、注解与流转状态；
+不能保证终态会话预览同步变化，也不会虚构更新参数或重发卡片来模拟更新。旧卡片需重新发起交互验收。
+
+## 生命周期与验收
+
+### 紧凑交互模板
+
+- 单题以完整问题作唯一主标题，省略分类 header、题号和问题数量提示；多题保留编号后的完整问题。
+- 选项说明直接并入 `ChoicePicker.options[].label`，例如“苹果 — 清甜多汁”，不再另列说明区域。
+  当前公开 Catalog 没有 option.description 字段；不虚构子标题或 Markdown 选项能力。
+  选项 value 仍为稳定的 `option_N`，恢复宿主时只映射回原 label，不能把展示说明当作答案。
+- 单选/多选有短标签；自由输入保留为“其他或补充（可选）”，允许无匹配选项时自行回答。
+- 审批只保留“操作确认”、原始工具名、完整 reason 和“允许一次 / 拒绝”；不截断有风险含义的正文。
+- 完成后使用简短状态标题、问题和答案回执，不重列选项说明。审批批准仍明确不代表执行成功。
+- 仅使用已公开的组件字段；原生选项行的高度、换行和跨端视觉效果仍需钉钉实机验收。
+
+设计参考：[Slack 确认交互](https://docs.slack.dev/reference/block-kit/composition-objects/confirmation-dialog-object/)
+的标题、说明与明确操作结构，以及 [GOV.UK Radios](https://design-system.service.gov.uk/components/radios/)
+将提示就近放在对应选项内的模式；没有引入它们的私有组件协议。
+
+### 生命周期
+
+pending 只保存在内存中：宿主关闭、卸载或请求中止时结束等待。进程崩溃后没有可恢复 Promise，
+重启不重新执行旧操作。晚返回的创建结果会尝试更新为失效状态，未知创建结果可能留下不可再授权的旧卡片。
+关闭不保证强制终止不遵守 AbortSignal 的传输，也不等待全部终态重绘；网络资源排空由传输所属宿主负责。
+
+本地测试覆盖原生事件入口、卡片内容、结构化答案、身份/卡片/来源不匹配、授权版本变化、并发请求、重复点击、
+超时、AbortSignal、卸载、发卡失败及晚返回、终态更新失败和打包导入。
+
+2026-09-16 使用独立 Cordis 验收夹具和 haoxiao 测试版 DWS `v0.0.0-build.27.2` 实测：
+真实原子卡片点击以 `a2uiEvent.action.context` 回传，服务端操作人提供 `operatorDTO.openDingTalkId`。
+修复后批准回调恢复为 `allowed-once`，ask 单选、多选和留空文本回传成功，两个终态更新获服务端接受。
+本轮没有执行工具，未验证非空文本与终态客户端显示，也不等于实际 DSH Agent / 模型运行时端到端验收。
+
+实机接入前必须验证：
+
+- 原子组件在目标钉钉客户端可显示，输入绑定和按钮 context 求值正确。
+- 真正发卡响应能取得业务 ID 和 Surface ID，且可更新终态。
+- 哪个 Profile 能消费该卡片回调；实际 UID 或 OpenDingTalkId 与管理员/提问对象的可信映射。
+- `action.event.context` 到上述回调字段的映射，不把静态样例当作线上证据。
+- 在真实 DSH 宿主恢复原请求，且非授权人、重复点击、撤权和超时均不能执行工具。
+
+未把用户提供的待开放协议包或完整 Catalog 随仓库分发；此处只实现所需原子消息构造。

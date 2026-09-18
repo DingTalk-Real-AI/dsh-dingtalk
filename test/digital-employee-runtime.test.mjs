@@ -78,8 +78,16 @@ async function createFakeDws(root, pathCommand = false) {
 const fs = require('node:fs')
 const record = process.env.FAKE_DWS_RECORD
 const args = process.argv.slice(2)
+if (args.includes('--help')) {
+  process.stdout.write(process.env.FAKE_DWS_A2UI === '1' ? '--summary --content --a2ui-annotations --open-dingtalk-id --conversation-id --biz-id --flow-status --flatten user_card_action_triggered' : '{}')
+  process.exit(0)
+}
 const operation = args.includes('capabilities') ? 'capabilities' : args.includes('reply') ? 'reply' : args.includes('operator-private') ? 'operator-private' : args.includes('consume') ? 'consume' : 'unknown'
 fs.appendFileSync(record, JSON.stringify({ operation, args, credentialEnvKeys: Object.keys(process.env).filter((key) => /TOKEN|AUTH_?CODE|CLIENT_?SECRET|PASSWORD|CREDENTIAL/i.test(key)) }) + '\\n')
+if (args.includes('send-a2ui-card') || args.includes('update-a2ui-card')) {
+  process.stdout.write(JSON.stringify({ ok: true, data: { bizId: 'host-card' } }))
+  process.exit(0)
+}
 if (operation === 'capabilities') {
   process.stdout.write(JSON.stringify({ ok: true, outcome: 'success', data: { schemaVersion: 1, protocolVersion: 1, auditMode: 'local_required', capabilities: { eventConsume: true, replyStdin: true, operatorPrivateStdin: true } }, meta: {} }))
   process.exit(0)
@@ -88,6 +96,20 @@ if (operation === 'capabilities') {
 let input = ''
 if (operation === 'consume') {
   process.stderr.write('[event] ready event_count=0 bus_pid=123\\n')
+  if (process.env.FAKE_DWS_A2UI === '1' && args.includes('user_card_action_triggered')) {
+    const timer = setInterval(() => {
+      const records = fs.readFileSync(record, 'utf8').trim().split('\\n').map(JSON.parse)
+      const send = records.find((item) => item.args.includes('send-a2ui-card'))
+      const updated = records.some((item) => item.args.includes('update-a2ui-card'))
+      if (!send || !updated) return
+      clearInterval(timer)
+      const components = JSON.parse(send.args[send.args.indexOf('--content') + 1]).map(JSON.parse).find((m) => m.updateComponents).updateComponents.components
+      const interactionId = components.find((c) => c.id === 'submit').action.event.context.interactionId
+      const context = { interactionId, action: 'submit', answers: { q0: { selected: ['option_0'], custom: '' } } }
+      const body = { bizInfoDTO: { bizId: 'host-card' }, operatorDTO: { openDingTalkId: 'allowed-open-id' }, a2uiEvent: { action: { context } } }
+      process.stdout.write(JSON.stringify({ type: 'user_card_action_triggered', payload: { body } }) + '\\n')
+    }, 20)
+  }
   const events = [
     { type: 'user_im_message_receive_group_all', event_id: 'event-allowed', message_id: 'message-allowed', conversation_id: 'allowed-group', sender_open_dingtalk_id: 'allowed-open-id', sender: '成员', content: '只应通过 stdin 回复的正文', event_time: '1' },
     { type: 'user_im_message_receive_group_all', event_id: 'event-allowed', message_id: 'message-allowed', conversation_id: 'allowed-group', sender_open_dingtalk_id: 'allowed-open-id', sender: '成员', content: '重复正文', event_time: '1' },
@@ -101,7 +123,7 @@ if (operation === 'consume') {
     process.stdout.write(first.slice(20) + '\\n')
     process.stdout.write(JSON.stringify(events[1]) + '\\n')
     process.stdout.write(JSON.stringify(events[2]) + '\\n')
-    setTimeout(() => process.stdout.write(JSON.stringify(events[3]) + '\\n'), 50)
+    if (process.env.FAKE_DWS_A2UI !== '1') setTimeout(() => process.stdout.write(JSON.stringify(events[3]) + '\\n'), 50)
   }, 10)
   process.stdin.resume()
   process.stdin.on('end', () => process.exit(0))
@@ -210,13 +232,13 @@ if (args.includes('consume')) {
   return writeFakeDwsCommand(root, 'dws-slow-exit', source)
 }
 
-function createHost() {
+function createHost(interact) {
   const handlers = new Map()
   const agents = new Map()
   const followups = []
   const sessions = []
   const emit = (name, ...args) => {
-    for (const handler of handlers.get(name) ?? []) handler(...args)
+    return Promise.all((handlers.get(name) ?? []).map((handler) => handler(...args)))
   }
   const ctx = {
     credentials: { resolve: async () => undefined },
@@ -242,7 +264,8 @@ function createHost() {
           ctx: agentCtx,
           followup(message) {
             followups.push({ sessionId: options.sessionId, message })
-            queueMicrotask(() => {
+            queueMicrotask(async () => {
+              await interact?.(agent, scoped)
               emit(
                 'session/event',
                 { id: options.sessionId },
@@ -307,6 +330,71 @@ function pluginConfig(workspace, digitalEmployees) {
     debug: false,
   }
 }
+
+test(
+  '默认 apply 完整接线：不用环境开关，从消息到原生 ask、发卡、订阅回调恢复请求',
+  { skip: process.platform === 'win32' },
+  async (t) => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-default-a2ui-'))
+    const keys = ['PATH', 'FAKE_DWS_RECORD', 'DSH_DINGTALK_STATE_DIR', 'FAKE_DWS_A2UI']
+    const old = Object.fromEntries(keys.map((key) => [key, process.env[key]]))
+    const binDir = path.join(root, 'bin')
+    await mkdir(binDir)
+    await createFakeDws(binDir, true)
+    const recordFile = path.join(root, 'calls.jsonl')
+    Object.assign(process.env, {
+      PATH: `${binDir}${path.delimiter}${process.env.PATH}`,
+      FAKE_DWS_RECORD: recordFile,
+      DSH_DINGTALK_STATE_DIR: path.join(root, 'state'),
+      FAKE_DWS_A2UI: '1',
+    })
+    const answers = [],
+      errors = []
+    const host = createHost(async (agent, scoped) => {
+      try {
+        answers.push(
+          await scoped.get('user-questions/request')(
+            { agent, questions: [{ id: 'mode', question: '选择模式', options: [{ label: '安全' }] }] },
+            () => assert.fail('不得走下一处理器'),
+          ),
+        )
+      } catch (error) {
+        errors.push(error)
+      }
+    })
+    t.after(async () => {
+      await host.dispose()
+      for (const key of keys) {
+        if (old[key] === undefined) delete process.env[key]
+        else process.env[key] = old[key]
+      }
+      await rm(root, { recursive: true, force: true })
+    })
+    const config = pluginConfig(path.join(root, 'workspace'), [employee])
+    await apply(host.ctx, config)
+    await waitFor(() => answers.length || errors.length)
+    // 原生问答恢复早于最终模型回复和 task_end 审计；必须等整轮收口才能删除工作区。
+    const auditDir = path.join(root, 'state', 'digital-employees', employee.agentUuid, 'audit')
+    await waitFor(async () => {
+      const entries = (await readFile(path.join(auditDir, `${employee.agentUuid}.jsonl`), 'utf8').catch(() => ''))
+        .trim()
+        .split('\n')
+        .filter(Boolean)
+        .map(JSON.parse)
+      const unlocked = await stat(path.join(auditDir, `${employee.agentUuid}.lock`)).then(
+        () => false,
+        () => true,
+      )
+      return unlocked && entries.some((entry) => entry.operationType === 'task_end' && entry.status === 'completed')
+    })
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.deepEqual(errors, [])
+    assert.deepEqual(answers, [{ answers: [{ id: 'mode', selected: ['安全'] }] }])
+    const records = (await readFile(recordFile, 'utf8')).trim().split('\n').map(JSON.parse)
+    assert.ok(records.find((r) => r.operation === 'consume').args.includes('user_card_action_triggered'))
+    assert.equal(records.filter((r) => r.args.includes('send-a2ui-card')).length, 1)
+  },
+)
 
 test('fake DWS 验证 ready、半行/坏包隔离、白名单、去重、自回复 ledger 和安全 stdin', async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-dingtalk-de-runtime-'))

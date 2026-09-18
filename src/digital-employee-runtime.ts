@@ -38,6 +38,9 @@ export interface DigitalEmployeeRuntimeOptions {
   readyTimeoutMs?: number
   log(line: string): void
   onMessage(input: DigitalEmployeeInbound): void | Promise<void>
+  onCardAction?(event: unknown): void
+  /** 仅订阅启动失败且尚未发卡时调用，撤销 A2UI 后再启动原文字订阅。 */
+  onCardUnavailable?(): void
   onStatus?(status: DigitalEmployeeRuntimeStatus): void
 }
 
@@ -106,7 +109,10 @@ function normalizeInbound(event: DigitalEmployeeEvent): InboundMessage {
 
 export class DwsDigitalEmployeeSource implements InboundSource {
   private child?: ChildProcessWithoutNullStreams
+  private readonly childClosed = new WeakMap<ChildProcessWithoutNullStreams, Promise<void>>()
   private stopped = false
+  private cardsDisabled = false
+  private cardSubscriptionReady = false
   private status: DigitalEmployeeRuntimeStatus = { state: 'probing', observedAt: Date.now() }
   private readonly ledger: DigitalEmployeeLedger
   private eventChain = Promise.resolve()
@@ -147,6 +153,19 @@ export class DwsDigitalEmployeeSource implements InboundSource {
       try {
         await this.startConsumer()
       } catch (error) {
+        if (
+          this.options.onCardAction &&
+          this.options.onCardUnavailable &&
+          !this.cardSubscriptionReady &&
+          !this.stopped
+        ) {
+          if (this.child) await this.terminateChild(this.child)
+          this.cardsDisabled = true
+          this.options.onCardUnavailable()
+          this.options.log('a2ui subscription unavailable before delivery; using text interactions')
+          await this.startConsumer()
+          return
+        }
         if (!(await this.retryConsumer(this.lastRetryable))) throw error
       }
     } catch (error) {
@@ -161,6 +180,7 @@ export class DwsDigitalEmployeeSource implements InboundSource {
     const child = this.child
     this.child = undefined
     if (child) await this.terminateChild(child)
+    await this.eventChain
     this.updateStatus({ state: 'stopped' })
   }
 
@@ -172,7 +192,7 @@ export class DwsDigitalEmployeeSource implements InboundSource {
     await this.replySink.probe()
     this.updateStatus({
       capabilitiesVerifiedAt: Date.now(),
-      subscriptionTopics: ['user_im_message_receive_o2o_all', 'user_im_message_receive_group_all'],
+      subscriptionTopics: this.subscriptionTopics(),
     })
   }
 
@@ -184,8 +204,7 @@ export class DwsDigitalEmployeeSource implements InboundSource {
       this.options.employee.dwsProfile,
       'event',
       'consume',
-      'user_im_message_receive_o2o_all',
-      'user_im_message_receive_group_all',
+      ...this.subscriptionTopics(),
       '--flatten',
       '--format',
       'ndjson',
@@ -196,15 +215,19 @@ export class DwsDigitalEmployeeSource implements InboundSource {
       env: sanitizedDwsEnvironment(process.env),
     })
     this.child = child
+    // 从创建时记录 close；信号退出的 exitCode 仍为 null，不能重新等待已发出的事件。
+    this.childClosed.set(child, new Promise<void>((resolve) => child.once('close', () => resolve())))
     let stdoutBuffer = ''
     let stderrBuffer = ''
     let ready = false
     let retryable: boolean | undefined
     let readyTimedOut = false
     const consumeLine = (line: string, stream: 'stdout' | 'stderr') => {
+      if (this.stopped) return
       if (READY_LINE.test(line)) {
         ready = true
-        this.updateStatus({ state: 'ready' })
+        if (this.options.onCardAction && !this.cardsDisabled) this.cardSubscriptionReady = true
+        this.updateStatus({ state: 'ready', subscriptionTopics: this.subscriptionTopics() })
         this.startHeartbeat()
         return
       }
@@ -222,12 +245,17 @@ export class DwsDigitalEmployeeSource implements InboundSource {
         this.options.log('event parse rejected (invalid_json)')
         return
       }
+      // 卡片控制事件不得等待正在阻塞于审批/问答的普通消息队列。
+      if ((value as { type?: string })?.type === 'user_card_action_triggered') {
+        if (!this.stopped && !this.cardsDisabled) this.options.onCardAction?.(value)
+        return
+      }
       this.eventChain = this.eventChain
         .then(() => this.handleEvent(parseEvent(value)))
         .catch((error) => this.options.log(`event rejected (${error instanceof Error ? error.message : 'unknown'})`))
     }
-    const drain = (chunk: Buffer, stream: 'stdout' | 'stderr') => {
-      let buffer = (stream === 'stdout' ? stdoutBuffer : stderrBuffer) + chunk.toString('utf8')
+    const drain = (chunk: string, stream: 'stdout' | 'stderr') => {
+      let buffer = (stream === 'stdout' ? stdoutBuffer : stderrBuffer) + chunk
       for (;;) {
         const index = buffer.indexOf('\n')
         if (index < 0) break
@@ -251,8 +279,11 @@ export class DwsDigitalEmployeeSource implements InboundSource {
       if (stream === 'stdout') stdoutBuffer = buffer
       else stderrBuffer = buffer
     }
-    child.stdout.on('data', (chunk: Buffer) => drain(chunk, 'stdout'))
-    child.stderr.on('data', (chunk: Buffer) => drain(chunk, 'stderr'))
+    // 流式解码保留跨 chunk 的 UTF-8 字节，避免中文表单回答被替换成乱码。
+    child.stdout.setEncoding('utf8')
+    child.stderr.setEncoding('utf8')
+    child.stdout.on('data', (chunk: string) => drain(chunk, 'stdout'))
+    child.stderr.on('data', (chunk: string) => drain(chunk, 'stderr'))
 
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -291,6 +322,14 @@ export class DwsDigitalEmployeeSource implements InboundSource {
     return retryable === false ? 0 : retryable === true ? 2 : 1
   }
 
+  private subscriptionTopics(): string[] {
+    return [
+      'user_im_message_receive_o2o_all',
+      'user_im_message_receive_group_all',
+      ...(this.options.onCardAction && !this.cardsDisabled ? ['user_card_action_triggered'] : []),
+    ]
+  }
+
   private async retryConsumer(retryable: boolean | undefined): Promise<boolean> {
     if (this.restarting || this.stopped) return false
     this.restarting = true
@@ -315,6 +354,7 @@ export class DwsDigitalEmployeeSource implements InboundSource {
   }
 
   private async handleEvent(event: DigitalEmployeeEvent): Promise<void> {
+    if (this.stopped) return
     if (this.ledger.hasEvent(event.eventId) || this.ledger.hasSentMessage(event.messageId)) return
     const allowed = authorizeDigitalEmployeeEvent(this.options.employee, event)
     if (!allowed) {
@@ -326,6 +366,7 @@ export class DwsDigitalEmployeeSource implements InboundSource {
     await this.replySink.audit({ eventId: event.eventId, operationType: 'access_check', status: 'accepted' })
     await this.replySink.waitForPendingReplies(event.conversationId)
     if (this.ledger.hasEvent(event.eventId) || this.ledger.hasSentMessage(event.messageId)) return
+    if (this.stopped) return
     if (this.status.state === 'failed') throw new Error('digital_employee_fail_closed')
     this.ledger.markEvent(event.eventId)
     this.updateStatus({ state: 'ready', lastEventAt: Date.now() })
@@ -344,15 +385,26 @@ export class DwsDigitalEmployeeSource implements InboundSource {
   }
 
   private async terminateChild(child: ChildProcessWithoutNullStreams): Promise<void> {
-    if (child.exitCode !== null) return
-    const closed = new Promise<void>((resolve) => child.once('close', () => resolve()))
-    child.stdin.end()
-    await Promise.race([closed, new Promise<void>((resolve) => setTimeout(resolve, 1_000))])
-    if (child.exitCode === null) {
-      child.kill('SIGTERM')
-      // 不使用 SIGKILL；等待确认旧订阅进程真实退出后才允许重试或完成 stop。
+    const closed = this.childClosed.get(child)
+    if (!closed) throw new Error('untracked_event_consumer')
+    if (child.exitCode !== null || child.signalCode !== null) {
       await closed
+      return
     }
+    child.stdin.end()
+    let timer: ReturnType<typeof setTimeout> | undefined
+    await Promise.race([
+      closed,
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, 1_000)
+      }),
+    ])
+    if (timer) clearTimeout(timer)
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill('SIGTERM')
+    }
+    // 不使用 SIGKILL；仍等待进程及 stdio 真正关闭后才允许重试或完成 stop。
+    await closed
   }
 
   private startHeartbeat(): void {

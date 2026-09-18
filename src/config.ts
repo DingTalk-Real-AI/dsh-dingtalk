@@ -22,6 +22,8 @@ export interface AccountConfig {
 export interface Config {
   accounts: AccountConfig[]
   digitalEmployees: DigitalEmployeeConfig[]
+  /** 数字员工默认优先 A2UI；text 是显式回滚开关。 */
+  interactionMode?: 'auto' | 'text'
   clientId: string
   clientSecret: string
   workspace: string
@@ -83,6 +85,9 @@ const DigitalEmployeeConfigSchema: Schema<DigitalEmployeeConfig> = Schema.object
 })
 
 export const Config: Schema<Config> = Schema.object({
+  interactionMode: Schema.union(['auto', 'text'])
+    .default('auto')
+    .description('数字员工审批/提问：auto 优先 A2UI，能力缺失时降级文字；text 强制文字'),
   accounts: Schema.array(AccountConfigSchema)
     .default([])
     .description('多机器人列表；为空时兼容读取下方旧版单机器人配置'),
