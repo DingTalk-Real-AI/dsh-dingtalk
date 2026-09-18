@@ -37,6 +37,7 @@ import { resolveStateDir } from './paths.js'
 import { cardTarget } from './targets.js'
 import { DwsDigitalEmployeeSource, type DigitalEmployeeInbound } from './digital-employee-runtime.js'
 import { DigitalEmployeeApprovalManager, DigitalEmployeeTextRenderer } from './digital-employee-renderer.js'
+import { employeeA2ui } from './digital-employee-a2ui.js'
 import { routeDigitalEmployeePreTask } from './digital-employee-routing.js'
 import { BotReplySink } from './reply-sink.js'
 import { RobotStreamSource } from './inbound-source.js'
@@ -153,11 +154,23 @@ async function startDigitalEmployee(
   let renderer!: DigitalEmployeeTextRenderer
   let approvals!: DigitalEmployeeApprovalManager
   let commands!: Commands
+  const a2ui = employeeA2ui(employee, config.approvalTimeoutMs, log, {
+    questionTimeoutMs: config.questionTimeoutMs,
+    audit: (fields) => runtime.replySink.audit(fields),
+  })
+  const useCards = config.interactionMode !== 'text' && (await a2ui.prepare())
+  const installInteractions = (agentCtx: HostAgentContext) => {
+    approvals.install(agentCtx)
+    a2ui.install(agentCtx)
+  }
 
   const runtime = new DwsDigitalEmployeeSource({
     employee,
     stateDir,
     log,
+    onCardAction: useCards ? (event) => a2ui.handleEvent(event) : undefined,
+    onCardUnavailable: () => a2ui.disable(),
+    onStatus: (status) => a2ui.setConnected(status.state === 'ready'),
     onMessage: async (input) => {
       commandReplyEvents.set(input.message.msgId, input.event)
       try {
@@ -201,6 +214,7 @@ async function startDigitalEmployee(
     employee.operatorOpenDingTalkId,
     config.approvalTimeoutMs,
     log,
+    config.questionTimeoutMs,
   )
   commands = new Commands({
     agents,
@@ -241,7 +255,8 @@ async function startDigitalEmployee(
     connectorStatus: () => {
       const status = runtime.currentStatus()
       return [
-        `Channel：数字员工文本模式（protocol 1）`,
+        `Channel：数字员工（protocol 1）`,
+        `审批/提问：${a2ui.available() ? 'A2UI 优先' : '文字交互（能力不可用或已配置 text）'}`,
         `DWS Profile：${employee.dwsProfile}`,
         `事件进程：${status.state}`,
         `额外私聊白名单：${employee.allowedDirectSenders.length} 人`,
@@ -263,6 +278,8 @@ async function startDigitalEmployee(
       eventsByMessageId.delete(msg.msgId)
       if (event) {
         approvals.bindSession(agent.id, event)
+        a2ui.bindSession(agent.id, event)
+        installInteractions(agent.ctx)
         await replySink.audit({
           eventId: event.eventId,
           sessionId: agent.id,
@@ -274,28 +291,41 @@ async function startDigitalEmployee(
     },
     compose: async () => {
       const presets = (ctx as any).get?.('agentPresets') as HostAgentPresets | undefined
-      if (!presets) return { setup: async (agentCtx: HostAgentContext) => approvals.install(agentCtx) }
+      if (!presets) return { setup: async (agentCtx: HostAgentContext) => installInteractions(agentCtx) }
       try {
         const resolved = await presets.resolve(undefined)
         return {
           agentPreset: resolved.id,
           setup: async (agentCtx: HostAgentContext) => {
             await presets.mount(agentCtx, resolved.id)
-            approvals.install(agentCtx)
+            installInteractions(agentCtx)
           },
         }
       } catch (error) {
         log(`preset compose failed (${error instanceof Error ? error.message : error})`)
-        return { setup: async (agentCtx: HostAgentContext) => approvals.install(agentCtx) }
+        return { setup: async (agentCtx: HostAgentContext) => installInteractions(agentCtx) }
       }
     },
   })
   ;(ctx as any).on('session/event', (session: HostSession, event: HostSessionEvent) => {
     renderer.onSessionEvent(session, event)
   })
-  ;(ctx as any).on('dispose', () => runtime.stop())
-  await runtime.start()
-  log(`channel up: profile=${employee.dwsProfile} protocol=1 text-only`)
+  ;(ctx as any).on('dispose', async () => {
+    a2ui.close()
+    approvals.close()
+    await runtime.stop()
+    await a2ui.drain()
+  })
+  try {
+    await runtime.start()
+  } catch (error) {
+    a2ui.close()
+    approvals.close()
+    await runtime.stop()
+    await a2ui.drain()
+    throw error
+  }
+  log(`channel up: profile=${employee.dwsProfile} protocol=1 interactions=${a2ui.available() ? 'a2ui' : 'text'}`)
 }
 
 async function startAccount(

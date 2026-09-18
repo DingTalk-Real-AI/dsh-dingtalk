@@ -40,6 +40,26 @@ async function ready() {
   await new Promise((resolve) => setImmediate(resolve))
 }
 
+test('审批和问题分别遵守配置超时，非法问题超时被拒绝', async (t) => {
+  assert.throws(() => harness({ questionTimeoutMs: 0 }), /invalid_a2ui_options/)
+  const h = harness({ timeoutMs: 10_000, questionTimeoutMs: 20 })
+  t.after(() => h.manager.close())
+  await assert.rejects(
+    h.manager.ask('session-1', { questions: [{ id: 'q', question: '备注' }] }),
+    /a2ui_question_unavailable/,
+  )
+  const controller = new AbortController()
+  const approval = h.manager.approve({ agent: h.agent, toolName: 'fixture', signal: controller.signal })
+  let settled = false
+  void approval.then(() => {
+    settled = true
+  })
+  await new Promise((resolve) => setTimeout(resolve, 40))
+  assert.equal(settled, false)
+  controller.abort()
+  assert.equal(await approval, 'cancelled')
+})
+
 test('紧凑问答：单题只显示问题标题，说明并入选项且回调仍返回原标签', async (t) => {
   const h = harness()
   t.after(() => h.manager.close())

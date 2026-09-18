@@ -97,6 +97,7 @@ export interface A2uiInteractionOptions {
   /** 注入方标记的可信订阅来源，不读取卡片 context 中的来源字段。 */
   source: string
   timeoutMs: number
+  questionTimeoutMs?: number
   transport: A2uiTransport
   route(sessionId: SessionId, kind: 'approval' | 'ask'): A2uiRoute | undefined
   log?(line: string): void
@@ -377,7 +378,11 @@ export class A2uiInteractions {
       !options.source ||
       !Number.isSafeInteger(options.timeoutMs) ||
       options.timeoutMs < 1 ||
-      options.timeoutMs > 2_147_483_647
+      options.timeoutMs > 2_147_483_647 ||
+      (options.questionTimeoutMs !== undefined &&
+        (!Number.isSafeInteger(options.questionTimeoutMs) ||
+          options.questionTimeoutMs < 1 ||
+          options.questionTimeoutMs > 2_147_483_647))
     )
       throw new Error('invalid_a2ui_options')
   }
@@ -473,6 +478,8 @@ export class A2uiInteractions {
     }
     if (!route || !identity(route) || !route.bindingId || !route.target.id)
       return Promise.resolve({ outcome: 'unavailable' })
+    const timeoutMs =
+      kind === 'ask' ? (this.options.questionTimeoutMs ?? this.options.timeoutMs) : this.options.timeoutMs
     const id = randomUUID()
     const snapshot = structuredClone(route)
     return new Promise((resolve) => {
@@ -509,7 +516,7 @@ export class A2uiInteractions {
         kind,
         questions,
         route: snapshot,
-        expiresAt: Date.now() + this.options.timeoutMs,
+        expiresAt: Date.now() + timeoutMs,
         finish: (outcome, answers, timedOut) => {
           if (finished) return
           finished = outcome
@@ -523,7 +530,7 @@ export class A2uiInteractions {
           repaint()
         },
       }
-      const timer = setTimeout(() => pending.finish('unavailable', undefined, true), this.options.timeoutMs)
+      const timer = setTimeout(() => pending.finish('unavailable', undefined, true), timeoutMs)
       this.pending.set(id, pending)
       signal?.addEventListener('abort', onAbort, { once: true })
       if (signal?.aborted) {

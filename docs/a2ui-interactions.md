@@ -2,12 +2,13 @@
 
 ## 状态和范围
 
-这是第一阶段通用模块，通过同一 NPM 包的 `@dingtalk-real-ai/dsh-dingtalk/a2ui` 子路径提供，不拆分 SDK。
-默认插件启动行为不变；仅升级本包不会自动切换到 A2UI。
+通用模块通过同一 NPM 包的 `@dingtalk-real-ai/dsh-dingtalk/a2ui` 子路径提供，不拆分 SDK。
+数字员工默认运行流程已接线：`interactionMode` 默认为 `auto`，兼容 DWS 上优先使用 A2UI；不需要员工 UUID 环境变量。
+机器人无 DWS／可信 OpenDingTalkId 路由时仍使用原模板卡片与文字流程，不猜测身份转换。
 
 已实现原子卡片生成、DSH 原生请求接管、回调校验、单次恢复、显式终态更新，以及超时、取消、卸载处理。
-未实现真实卡片传输、DWS 事件订阅、身份解析和默认运行时配置接线；这些由下一阶段接入方实现并做实机验收。
-本阶段不是“钉钉端可直接使用”的完整功能，不宣称端到端验收通过。
+内置数字员工适配器实现 DWS 发卡、更新、回调订阅及可信配置路由。当前新增接线通过模拟 DWS 子进程与真实 Cordis 调度验证，
+本次默认接线与降级尚未做新版真实组织端到端验收，不将此前独立夹具的实机结果当作本次完整验收。
 
 ## 与 PR #20 的关系
 
@@ -17,8 +18,24 @@
 main 已有原生 `approval/request`、`user-questions/request` 类型与处理机制。
 #20 的增量负责数字员工 runtime 生命周期、租约、换绑和释放，不是 A2UI 卡片协议。
 
-建议独立 PR 交付本模块，保留 #20 的发布门禁。需要测试数字员工时，再在临时组合分支上集成
-#20、此模块和已验证的 DWS 传输，不提前合并或发布 #20，也不把测试版 DWS 当作官方已发布能力。
+本 PR 直接接入 main 已有的数字员工流程，不引入 #20 的启停、租约、换绑或 Web 会话恢复改造。
+保留 #20 独立交付，不把测试版 DWS 当作官方已发布能力；当前注册协议仍为 v1，配置变更需重启连接器。
+
+## 默认选择与安全降级
+
+根级配置 `interactionMode: auto`（默认）或 `interactionMode: text`（强制文字）。此项控制数字员工交互，
+不改变普通模型回复格式或机器人的原有模板卡片配置。
+
+- 启动时只读检查同一 DWS/Profile 的发卡、更新命令 Help、必要参数与卡片事件。
+  需要 `send-a2ui-card --summary`，以及 `--content`、`--a2ui-annotations`、用户/群目标、更新状态与业务 ID 参数。
+- 能力缺失、Help 无法确认、明确配置 text：不尝试发卡，使用原会话文字提问／operator 私聊确认码。
+- 首次卡片订阅未 ready：确认旧消费进程退出后，仅启动消息订阅并降级文字；不会并行留下两条消费者。
+- 订阅曾 ready 后掉线、发卡失败／超时／缺失唯一业务 ID：不重发卡片、不切换文字或 Web 授权；本次请求失败或等待至超时。
+- 卡片拒绝、取消、超时、撤权或终态更新失败：不降级、不重复恢复；文字降级也处理 AbortSignal、超时、关闭和并发冲突。
+- 审批卡片发给配置的 operator；ask 发原私聊提问人或原群，回调只接受原提问人。每次审批写本地元数据审计，审计失败不放行。
+
+Help 探测只证明 CLI 支持；订阅 ready 只证明连接已建立，均不等于目标客户端能渲染或服务端发卡已授权。
+若运行中遇到服务端不兼容，可将 `interactionMode` 改为 `text` 并重启，再重新发起请求；旧卡片不自动恢复。
 
 ## 接口与职责
 
@@ -30,9 +47,10 @@ main 已有原生 `approval/request`、`user-questions/request` 类型与处理�
 - `handleEvent(source, event)`：同步处理可信来源的卡片事件，不进入正在等待答案的会话队列。
 - `close()`：结束等待并卸载监听；未完成请求不会自动恢复。
 
-不得给同一个 Agent 同时安装旧的 `QuestionManager` / `DigitalEmployeeApprovalManager` 和本模块。
-本模块只监听原生请求，不覆盖旧 `ask_user_question` tool shadow；接入阶段须选择一个请求所有者，
-移除旧 shadow 或让它显式调用 `ask()`。不能因卡片发不出去而自动降级到另一个授权渠道。
+通用模块直接 `install` 时应独占 approve / ask。内置适配器不直接调用它的 `install`，
+而在 Agent 范围内统一分流：仅在发卡前确认能力不可用时把原请求交给文字管理器，否则由 A2UI 独占处理。
+两个入口都优先于 Web 回答器，并幂等安装；不会因一次发卡错误再次触发原请求或另一个授权渠道。
+本模块使用原生请求，不覆盖旧机器人的 `ask_user_question` tool shadow。
 
 接入方注入两个真实变化的接口：
 
@@ -52,7 +70,7 @@ main 已有原生 `approval/request`、`user-questions/request` 类型与处理�
    同一卡片的等待态与终态更新应串行，等待态更新失败不取消原请求。
    两个方法必须遵守 AbortSignal；不做无条件发卡重试，不承诺 exactly-once。
 
-示意接线（`cardTransport` 和 `trustedRoute` 必须由接入方实现，不是已实现的 DWS Adapter）：
+通用模块自定义接线示意（内置员工适配见 `src/digital-employee-a2ui.ts`）：
 
 ```ts
 import { A2uiInteractions } from '@dingtalk-real-ai/dsh-dingtalk/a2ui'
@@ -139,9 +157,10 @@ ask 仅补充信息，包括 Plan Review；它不是宿主工具执行授权，�
 DWS 当前创建接口固定 PROCESSING，因此投递后需再更新为 CONFIRMING，期间可能短暂显示处理中。
 客户端 lastMessage 是否采用摘要、是否优先显示流转状态，需实机验收；这不是一个直接设置 lastMessage 的 API。
 
-本地员工适配要求 DWS `send-a2ui-card` 支持 `--summary`，创建时显式传入上述固定等待文案。
+内置员工适配要求 DWS `send-a2ui-card` 支持 `--summary`，创建时显式传入上述固定等待文案。
 旧 DWS 把组件 JSON 拼入 `summary`，仅增加 artifact 注解不能解决会话列表泄露协议正文的问题。
-配套 DWS 修复使用“交互卡片”作为默认摘要，不支持该参数的版本不能用于此本地适配。
+配套 DWS 修复使用“交互卡片”作为默认摘要；不支持该参数的版本自动使用文字，不把组件 JSON 再次暴露为摘要。
+本 PR 不修改或发布 DWS；不能据此宣称官方 DWS 已支持该参数。
 当前服务端 `update_a2ui_card` 的公开工具 Schema 不包含 `summary`，因此更新仍只修改组件、注解与流转状态；
 不能保证终态会话预览同步变化，也不会虚构更新参数或重发卡片来模拟更新。旧卡片需重新发起交互验收。
 
