@@ -373,6 +373,21 @@ test(
     const config = pluginConfig(path.join(root, 'workspace'), [employee])
     await apply(host.ctx, config)
     await waitFor(() => answers.length || errors.length)
+    // 原生问答恢复早于最终模型回复和 task_end 审计；必须等整轮收口才能删除工作区。
+    const auditDir = path.join(root, 'state', 'digital-employees', employee.agentUuid, 'audit')
+    await waitFor(async () => {
+      const entries = (await readFile(path.join(auditDir, `${employee.agentUuid}.jsonl`), 'utf8').catch(() => ''))
+        .trim()
+        .split('\n')
+        .filter(Boolean)
+        .map(JSON.parse)
+      const unlocked = await stat(path.join(auditDir, `${employee.agentUuid}.lock`)).then(
+        () => false,
+        () => true,
+      )
+      return unlocked && entries.some((entry) => entry.operationType === 'task_end' && entry.status === 'completed')
+    })
+    await new Promise((resolve) => setImmediate(resolve))
     assert.deepEqual(errors, [])
     assert.deepEqual(answers, [{ answers: [{ id: 'mode', selected: ['安全'] }] }])
     const records = (await readFile(recordFile, 'utf8')).trim().split('\n').map(JSON.parse)
