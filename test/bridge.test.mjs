@@ -3,6 +3,71 @@ import test from 'node:test'
 
 import { Bridge } from '../lib/bridge.js'
 
+async function bridgeWithOwnedHandle(handle) {
+  const bridge = new Bridge(
+    { get: () => undefined, create: async () => handle },
+    { onInbound: async () => {} },
+    { get: () => undefined, set: () => {} },
+    {
+      exclusiveOwnership: true,
+      cwd: '/workspace',
+      log: () => {},
+      modelOverrides: { get: () => undefined },
+      workspaceOverrides: { get: () => undefined },
+      modelSelection: () => undefined,
+      compose: async () => ({}),
+      onAgentMessage: () => {},
+    },
+  )
+  await bridge.process({ msgId: 'fixture-message', conversationId: 'fixture-chat', text: 'fixture' }, 'fixture-chat')
+  return bridge
+}
+
+test('宿主先释放 inbox 后，Bridge 仍等待所属 handle 的幂等关闭，不重复 cancel', async () => {
+  let disposals = 0
+  const agent = {
+    id: 'fixture-session',
+    followup() {},
+    cancel() {
+      throw new Error('cannot read inbox state: its projection registration is not active')
+    },
+  }
+  const bridge = await bridgeWithOwnedHandle({
+    agent,
+    dispose: async () => {
+      disposals++
+    },
+  })
+  assert.deepEqual(await bridge.close(), ['fixture-session'])
+  assert.equal(disposals, 1)
+})
+
+test('Bridge 关闭等待 handle 完成，不能把未完成或失败的销毁视为释放', async () => {
+  let finish
+  const closing = new Promise((resolve) => {
+    finish = resolve
+  })
+  const agent = { id: 'fixture-session', followup() {}, cancel() {} }
+  const bridge = await bridgeWithOwnedHandle({ agent, dispose: () => closing })
+  let completed = false
+  const result = bridge.close().then(() => {
+    completed = true
+  })
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(completed, false)
+  finish()
+  await result
+  assert.equal(completed, true)
+
+  const failing = await bridgeWithOwnedHandle({
+    agent,
+    dispose: async () => {
+      throw new Error('release_unconfirmed')
+    },
+  })
+  await assert.rejects(failing.close(), /release_unconfirmed/)
+})
+
 test('Bridge 创建并持久化会话、注入消息且等待渲染完成', async () => {
   const followups = []
   const bindings = new Map()

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { chmod, lstat, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
+import { isDeepStrictEqual } from 'node:util'
 import { isMap, parse, parseDocument, stringify, YAMLMap } from 'yaml'
 import {
   accountCredentialRefs,
@@ -21,6 +22,8 @@ export type SenderAccess = 'all' | 'owner' | 'allowlist'
 export type GroupAccess = 'all' | 'none' | 'allowlist'
 
 export interface DigitalEmployeeConfig {
+  /** 省略表示旧版 DWS 绑定（代数 0）。 */
+  bindingRevision?: number
   agentUuid: string
   name?: string
   enabled: boolean
@@ -33,6 +36,7 @@ export interface DigitalEmployeeConfig {
 }
 
 export interface DigitalEmployeeRegistration {
+  bindingRevision?: number
   schemaVersion: 1
   agentUuid: string
   name?: string
@@ -507,6 +511,7 @@ async function writeWebProfile(
 }
 
 const DIGITAL_EMPLOYEE_FIELDS = new Set([
+  'bindingRevision',
   'schemaVersion',
   'agentUuid',
   'name',
@@ -515,6 +520,7 @@ const DIGITAL_EMPLOYEE_FIELDS = new Set([
   'protocolVersion',
 ])
 const DIGITAL_EMPLOYEE_CONFIG_FIELDS = new Set([
+  'bindingRevision',
   'agentUuid',
   'name',
   'enabled',
@@ -555,6 +561,7 @@ function assertStableIdentity(value: unknown, field: string): asserts value is s
 function validateDigitalEmployeeRegistration(value: unknown): DigitalEmployeeRegistration {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid_registration')
   const raw = value as Record<string, unknown>
+  validateBindingRevision(raw.bindingRevision)
   for (const field of Object.keys(raw)) {
     if (SENSITIVE_FIELD.test(field)) throw new Error('sensitive_field')
     if (!DIGITAL_EMPLOYEE_FIELDS.has(field)) throw new Error('unknown_field')
@@ -569,6 +576,7 @@ function validateDigitalEmployeeRegistration(value: unknown): DigitalEmployeeReg
   }
   return {
     schemaVersion: 1,
+    ...(raw.bindingRevision === undefined ? {} : { bindingRevision: Number(raw.bindingRevision) }),
     agentUuid: raw.agentUuid,
     ...(typeof raw.name === 'string' ? { name: raw.name.trim() } : {}),
     dwsProfile: raw.dwsProfile,
@@ -580,6 +588,7 @@ function validateDigitalEmployeeRegistration(value: unknown): DigitalEmployeeReg
 function parseDigitalEmployee(value: unknown): DigitalEmployeeConfig {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid_digital_employee')
   const raw = value as Record<string, unknown>
+  validateBindingRevision(raw.bindingRevision)
   for (const field of Object.keys(raw)) {
     if (SENSITIVE_FIELD.test(field)) throw new Error('sensitive_field')
     if (!DIGITAL_EMPLOYEE_CONFIG_FIELDS.has(field)) throw new Error('unknown_digital_employee_field')
@@ -597,6 +606,7 @@ function parseDigitalEmployee(value: unknown): DigitalEmployeeConfig {
   }
   return {
     agentUuid: raw.agentUuid,
+    ...(raw.bindingRevision === undefined ? {} : { bindingRevision: Number(raw.bindingRevision) }),
     ...(typeof raw.name === 'string' ? { name: raw.name.trim() } : {}),
     enabled: raw.enabled !== false,
     dwsProfile: raw.dwsProfile,
@@ -644,9 +654,12 @@ export async function registerDigitalEmployee(dshHome: string, value: unknown): 
     )
     if (duplicateProfile) throw new Error('duplicate_dws_profile')
     const existing = employees.find((employee) => employee.agentUuid === registration.agentUuid)
+    // DWS 重启补注册不携带展示名；省略表示保留，不应触发宿主配置重载。
+    const name = registration.name ?? existing?.name
     const next: DigitalEmployeeConfig = {
+      ...(registration.bindingRevision === undefined ? {} : { bindingRevision: registration.bindingRevision }),
       agentUuid: registration.agentUuid,
-      ...(registration.name ? { name: registration.name } : {}),
+      ...(name ? { name } : {}),
       enabled: true,
       dwsProfile: registration.dwsProfile,
       operatorOpenDingTalkId: registration.operatorOpenDingTalkId,
@@ -655,11 +668,10 @@ export async function registerDigitalEmployee(dshHome: string, value: unknown): 
       sessionScope: existing?.sessionScope ?? 'chat',
       protocolVersion: 1,
     }
-    if (existing !== undefined && JSON.stringify(existing) === JSON.stringify(next)) {
+    if (existing !== undefined && isDeepStrictEqual(existing, next)) {
       return { status: 'unchanged', restartRequired: false, agentUuid: registration.agentUuid }
     }
     if (existing) {
-      if (!registration.name) delete existing.name
       Object.assign(existing, next)
     } else employees.push(next)
     config.digitalEmployees = employees
@@ -672,9 +684,15 @@ export async function registerDigitalEmployee(dshHome: string, value: unknown): 
   })
 }
 
+function validateBindingRevision(value: unknown): void {
+  if (value !== undefined && (!Number.isSafeInteger(value) || Number(value) < 0))
+    throw new Error('invalid_binding_revision')
+}
+
 export async function unregisterDigitalEmployee(
   dshHome: string,
   agentUuid: string,
+  expected?: { dwsProfile: string; bindingRevision?: number },
 ): Promise<DigitalEmployeeMutationResult> {
   assertSafeDigitalEmployeeId(agentUuid)
   const file = path.join(dshHome, 'profiles', 'web', 'cordis.patch.yml')
@@ -683,6 +701,13 @@ export async function unregisterDigitalEmployee(
     const { current, config } = ownedPluginConfig(entries)
     const employees = parseDigitalEmployees(config.digitalEmployees)
     const remaining = employees.filter((employee) => employee.agentUuid !== agentUuid)
+    const target = employees.find((employee) => employee.agentUuid === agentUuid)
+    if (
+      target &&
+      expected &&
+      (target.dwsProfile !== expected.dwsProfile || (target.bindingRevision ?? 0) !== (expected.bindingRevision ?? 0))
+    )
+      throw new Error('binding_mismatch')
     if (remaining.length === employees.length) {
       return { status: 'not_found', restartRequired: false, agentUuid }
     }

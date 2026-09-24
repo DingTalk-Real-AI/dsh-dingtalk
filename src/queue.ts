@@ -18,6 +18,19 @@ const TASK_TIMEOUT_MS = 15 * 60_000
 
 export class Queue {
   private entries = new Map<string, Entry>()
+  private closed = false
+  private readonly active = new Set<Promise<void>>()
+
+  close(): void {
+    this.closed = true
+    for (const entry of this.entries.values()) entry.generation++
+  }
+
+  async drain(): Promise<void> {
+    await Promise.allSettled([...this.entries.values()].map((entry) => entry.tail))
+    // 不能把会话排队超时误当作 Agent 已退出。
+    await Promise.allSettled([...this.active])
+  }
 
   constructor(private readonly log: (line: string) => void) {}
 
@@ -36,6 +49,7 @@ export class Queue {
    * when earlier work is still pending.
    */
   run(key: string, task: () => Promise<void>, onBusy?: (position: number) => void): Promise<void> {
+    if (this.closed) return Promise.resolve()
     const now = Date.now()
     for (const [k, e] of this.entries) {
       if (e.depth === 0 && now - e.settledAt > CLEANUP_AFTER_MS) this.entries.delete(k)
@@ -57,9 +71,12 @@ export class Queue {
     const guarded = async () => {
       let timer: ReturnType<typeof setTimeout> | undefined
       try {
-        if (entry.generation !== generation) return
+        if (this.closed || entry.generation !== generation) return
+        const running = Promise.resolve().then(task)
+        this.active.add(running)
+        void running.finally(() => this.active.delete(running)).catch(() => undefined)
         await Promise.race([
-          task(),
+          running,
           new Promise<void>((resolve) => {
             timer = setTimeout(() => {
               this.log(
