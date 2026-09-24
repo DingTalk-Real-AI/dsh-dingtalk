@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
@@ -21,6 +21,83 @@ const registration = {
   operatorOpenDingTalkId: 'operator-open-id',
   protocolVersion: 1,
 }
+
+function registerUsingCLI(dshHome, value) {
+  const result = spawnSync(process.execPath, ['lib/bin.js', 'digital-employee', 'register', '--stdin', '--json'], {
+    cwd: path.resolve('.'),
+    encoding: 'utf8',
+    env: { ...process.env, DSH_HOME: dshHome },
+    input: JSON.stringify(value),
+  })
+  assert.equal(result.status, 0, result.stderr)
+  return JSON.parse(result.stdout)
+}
+
+test('CLI 重复注册带绑定版本的员工不改写宿主配置', async (t) => {
+  const dshHome = await mkdtemp(path.join(os.tmpdir(), 'dsh-dingtalk-de-revision-'))
+  t.after(() => rm(dshHome, { recursive: true, force: true }))
+  const input = { ...registration, bindingRevision: 1 }
+  assert.equal(registerUsingCLI(dshHome, input).status, 'created')
+  const file = path.join(dshHome, 'profiles', 'web', 'cordis.patch.yml')
+  // 固定旧时间，避免文件系统时间精度让一次重写被误判为未写。
+  await utimes(file, new Date('2000-01-01T00:00:00Z'), new Date('2000-01-01T00:00:00Z'))
+  const before = { content: await readFile(file, 'utf8'), mtimeMs: (await stat(file)).mtimeMs }
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    assert.deepEqual(registerUsingCLI(dshHome, input), {
+      schemaVersion: 1,
+      kind: 'digital_employee_registration',
+      status: 'unchanged',
+      restartRequired: false,
+      agentUuid: registration.agentUuid,
+    })
+    assert.equal(await readFile(file, 'utf8'), before.content)
+    assert.equal((await stat(file)).mtimeMs, before.mtimeMs)
+  }
+})
+
+test('CLI 重启补注册省略名称时保留员工名称和访问设置且不写盘', async (t) => {
+  const dshHome = await mkdtemp(path.join(os.tmpdir(), 'dsh-dingtalk-de-restart-'))
+  t.after(() => rm(dshHome, { recursive: true, force: true }))
+  const input = { ...registration, bindingRevision: 2 }
+  registerUsingCLI(dshHome, input)
+  const access = {
+    allowedDirectSenders: ['allowed-sender'],
+    allowedGroups: ['allowed-group'],
+    sessionScope: 'chat-sender',
+  }
+  await updateDigitalEmployeeAccess(dshHome, registration.agentUuid, access)
+  const file = path.join(dshHome, 'profiles', 'web', 'cordis.patch.yml')
+  await utimes(file, new Date('2000-01-01T00:00:00Z'), new Date('2000-01-01T00:00:00Z'))
+  const before = { content: await readFile(file, 'utf8'), mtimeMs: (await stat(file)).mtimeMs }
+  const { name, ...restartRegistration } = input
+
+  assert.equal(registerUsingCLI(dshHome, restartRegistration).status, 'unchanged')
+  assert.equal(await readFile(file, 'utf8'), before.content)
+  assert.equal((await stat(file)).mtimeMs, before.mtimeMs)
+  const [employee] = (await loadWebProfileConfig(dshHome)).digitalEmployees
+  assert.equal(employee.name, name)
+  assert.equal(employee.bindingRevision, 2)
+  assert.deepEqual(employee.allowedDirectSenders, access.allowedDirectSenders)
+  assert.deepEqual(employee.allowedGroups, access.allowedGroups)
+  assert.equal(employee.sessionScope, access.sessionScope)
+})
+
+test('CLI 真正变更绑定版本或名称仍更新配置且后续补注册幂等', async (t) => {
+  const dshHome = await mkdtemp(path.join(os.tmpdir(), 'dsh-dingtalk-de-update-'))
+  t.after(() => rm(dshHome, { recursive: true, force: true }))
+  registerUsingCLI(dshHome, { ...registration, bindingRevision: 1 })
+  const nextRevision = { ...registration, bindingRevision: 2 }
+  assert.equal(registerUsingCLI(dshHome, nextRevision).status, 'updated')
+  assert.equal((await loadWebProfileConfig(dshHome)).digitalEmployees[0].bindingRevision, 2)
+  assert.equal(registerUsingCLI(dshHome, nextRevision).status, 'unchanged')
+
+  const renamed = { ...nextRevision, name: '更新后的值班助手' }
+  assert.equal(registerUsingCLI(dshHome, renamed).status, 'updated')
+  const { name, ...restartRegistration } = renamed
+  assert.equal(registerUsingCLI(dshHome, restartRegistration).status, 'unchanged')
+  assert.equal((await loadWebProfileConfig(dshHome)).digitalEmployees[0].name, name)
+})
 
 test('register 幂等写入非敏感数字员工配置并保留白名单', async (t) => {
   const dshHome = await mkdtemp(path.join(os.tmpdir(), 'dsh-dingtalk-de-config-'))

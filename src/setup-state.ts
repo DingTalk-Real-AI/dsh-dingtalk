@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { chmod, lstat, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
+import { isDeepStrictEqual } from 'node:util'
 import { isMap, parse, parseDocument, stringify, YAMLMap } from 'yaml'
 import {
   accountCredentialRefs,
@@ -653,10 +654,12 @@ export async function registerDigitalEmployee(dshHome: string, value: unknown): 
     )
     if (duplicateProfile) throw new Error('duplicate_dws_profile')
     const existing = employees.find((employee) => employee.agentUuid === registration.agentUuid)
+    // DWS 重启补注册不携带展示名；省略表示保留，不应触发宿主配置重载。
+    const name = registration.name ?? existing?.name
     const next: DigitalEmployeeConfig = {
       ...(registration.bindingRevision === undefined ? {} : { bindingRevision: registration.bindingRevision }),
       agentUuid: registration.agentUuid,
-      ...(registration.name ? { name: registration.name } : {}),
+      ...(name ? { name } : {}),
       enabled: true,
       dwsProfile: registration.dwsProfile,
       operatorOpenDingTalkId: registration.operatorOpenDingTalkId,
@@ -665,11 +668,10 @@ export async function registerDigitalEmployee(dshHome: string, value: unknown): 
       sessionScope: existing?.sessionScope ?? 'chat',
       protocolVersion: 1,
     }
-    if (existing !== undefined && JSON.stringify(existing) === JSON.stringify(next)) {
+    if (existing !== undefined && isDeepStrictEqual(existing, next)) {
       return { status: 'unchanged', restartRequired: false, agentUuid: registration.agentUuid }
     }
     if (existing) {
-      if (!registration.name) delete existing.name
       Object.assign(existing, next)
     } else employees.push(next)
     config.digitalEmployees = employees
