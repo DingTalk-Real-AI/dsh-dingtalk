@@ -370,7 +370,8 @@ export class DwsDigitalEmployeeSource implements InboundSource {
     if (this.stopped) return
     if (this.status.state === 'failed') throw new Error('digital_employee_fail_closed')
     this.ledger.markEvent(event.eventId)
-    this.updateStatus({ state: 'ready', lastEventAt: Date.now() })
+    // 旧入站可能等到重连期间才完成；只有新订阅的 ready 行能恢复连接状态。
+    this.updateStatus({ lastEventAt: Date.now() })
     void Promise.resolve(
       this.options.onMessage({
         event,

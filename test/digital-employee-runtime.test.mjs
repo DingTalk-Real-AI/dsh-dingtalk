@@ -173,6 +173,128 @@ if (args.includes('capabilities')) {
   assert.equal(cardsConnected, false)
 })
 
+test('重连中旧入站完成不能提前恢复 ready，替代订阅必须真正就绪', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-reconnecting-event-'))
+  const stateDir = path.join(root, 'state')
+  const file = (name) => path.join(root, name)
+  const invocation = await writeFakeDwsCommand(
+    root,
+    'reconnecting-event',
+    `
+const fs = require('node:fs')
+const path = require('node:path')
+const args = process.argv.slice(2)
+const file = (name) => path.join(args[0], name)
+const envelope = (data) => process.stdout.write(JSON.stringify({ ok: true, outcome: 'success', data, meta: {} }))
+if (args.includes('capabilities')) {
+  envelope({ schemaVersion: 1, protocolVersion: 1, auditMode: 'local_required', capabilities: { eventConsume: true, replyStdin: true, operatorPrivateStdin: true } })
+} else if (args.includes('consume')) {
+  const count = fs.existsSync(file('consume-count')) ? Number(fs.readFileSync(file('consume-count'), 'utf8')) + 1 : 1
+  fs.writeFileSync(file('consume-count'), String(count))
+  let ready = count === 1
+  let sent = false
+  if (ready) process.stderr.write('[event] ready\\nretryable=true\\n')
+  const timer = setInterval(() => {
+    if (count === 1 && fs.existsSync(file('exit-consumer'))) process.exit(1)
+    if (!ready && fs.existsSync(file('replacement-ready'))) {
+      ready = true
+      process.stderr.write('[event] ready\\n')
+    }
+    if (count === 1 && !sent && fs.existsSync(file('emit-event'))) {
+      sent = true
+      process.stdout.write(JSON.stringify({ type: 'user_im_message_receive_group_all', event_id: 'fixture-delayed-event', message_id: 'fixture-delayed-inbound', conversation_id: 'allowed-group', sender_open_dingtalk_id: 'allowed-open-id', content: '夹具入站', event_time: '1' }) + '\\n')
+    }
+  }, 5)
+  process.stdin.resume()
+  process.stdin.on('end', () => { clearInterval(timer); process.exit(0) })
+} else if (args.includes('reply')) {
+  let input = ''
+  process.stdin.setEncoding('utf8')
+  process.stdin.on('data', (chunk) => { input += chunk })
+  process.stdin.on('end', () => {
+    const value = JSON.parse(input)
+    fs.writeFileSync(file('reply-started'), '')
+    const timer = setInterval(() => {
+      if (!fs.existsSync(file('finish-reply'))) return
+      clearInterval(timer)
+      envelope({ openMessageId: 'fixture-delayed-reply', conversationId: value.conversationId, deliveryStatus: 'delivered', idempotencyKey: value.idempotencyKey })
+    }, 5)
+  })
+}
+`,
+  )
+  const seen = []
+  let cardsConnected = false
+  let reply
+  const runtime = new DwsDigitalEmployeeSource({
+    employee,
+    stateDir,
+    ...invocation,
+    dwsArgsPrefix: [...invocation.dwsArgsPrefix, root],
+    log() {},
+    onMessage: (input) => seen.push(input.event.eventId),
+    onCardAction() {},
+    onStatus: (status) => {
+      cardsConnected = status.state === 'ready'
+    },
+  })
+  t.after(async () => {
+    await writeFile(file('finish-reply'), '')
+    await runtime.stop()
+    await reply
+    await rm(root, { recursive: true, force: true })
+  })
+  await runtime.start()
+  assert.equal(cardsConnected, true)
+  reply = runtime.replySink.reply(
+    {
+      schemaVersion: 1,
+      eventId: 'fixture-pending-reply-event',
+      messageId: 'fixture-pending-reply-inbound',
+      conversationId: 'allowed-group',
+      conversationType: 'group',
+      senderOpenDingTalkId: 'allowed-open-id',
+      senderName: '夹具成员',
+      text: '夹具请求',
+      createdAt: '1',
+    },
+    'fixture-session',
+    '夹具延迟回复',
+  )
+  await waitFor(() =>
+    stat(file('reply-started')).then(
+      () => true,
+      () => false,
+    ),
+  )
+  await writeFile(file('emit-event'), '')
+  // 旧消息通过审计后等待同会话下行，确保订阅断线发生在入站处理尚未完成时。
+  await waitFor(async () => {
+    const entries = (await readFile(path.join(stateDir, 'audit', `${employee.agentUuid}.jsonl`), 'utf8'))
+      .trim()
+      .split('\n')
+      .map(JSON.parse)
+    return entries.some((entry) => entry.eventId === 'fixture-delayed-event' && entry.status === 'accepted')
+  })
+  assert.deepEqual(seen, [])
+  await writeFile(file('exit-consumer'), '')
+  await waitFor(async () => {
+    const count = await readFile(file('consume-count'), 'utf8')
+    return count === '2' && runtime.currentStatus().state === 'connecting'
+  })
+  assert.equal(cardsConnected, false)
+  await writeFile(file('finish-reply'), '')
+  await reply
+  await waitFor(() => seen.length === 1)
+  assert.deepEqual(seen, ['fixture-delayed-event'])
+  assert.equal(runtime.currentStatus().state, 'connecting')
+  assert.equal(cardsConnected, false)
+  assert.equal(typeof runtime.currentStatus().lastEventAt, 'number')
+  await writeFile(file('replacement-ready'), '')
+  await waitFor(() => runtime.currentStatus().state === 'ready')
+  assert.equal(cardsConnected, true)
+})
+
 async function createFakeDws(root, pathCommand = false) {
   const source = `#!/usr/bin/env node
 const fs = require('node:fs')
