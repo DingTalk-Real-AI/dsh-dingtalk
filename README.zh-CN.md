@@ -182,6 +182,15 @@ pnpm config get registry
 
 第一版只支持 DSH `web` profile。macOS 和 Linux 为正式支持平台，Windows 为实验性平台。
 
+### A2UI 审批与提问（默认优先，支持降级）
+
+包内提供独立于数字员工生命周期的 `@dingtalk-real-ai/dsh-dingtalk/a2ui` 模块，支持组合 approve / ask
+卡片、校验 `user_card_action_triggered` 回调并恢复原生请求。数字员工默认使用 `interactionMode: auto`：
+探测 DWS 发卡、更新、语义摘要和回调订阅能力，通过后优先使用 A2UI；能力缺失时在发卡前降级文字。
+可配置 `interactionMode: text` 强制使用文字。不再需要员工 UUID 环境开关。
+卡片已经发送或投递结果不确定时，不自动重发、不另开文字审批。机器人保留原模板卡片／文字流程。
+详见 [接口、降级边界与验收说明](docs/a2ui-interactions.md)。
+
 ## 命令
 
 按推荐的 `npx` 方式安装后，请使用以下命令：

@@ -104,11 +104,206 @@ test('本地白名单分别覆盖 operator、额外私聊、群白名单和默�
   )
 })
 
+test('订阅断线后的迟到成功回复不能恢复 ready 或重新开启卡片交互', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-disconnected-reply-'))
+  const exitFile = path.join(root, 'exit-consumer')
+  const invocation = await writeFakeDwsCommand(
+    root,
+    'disconnected-reply',
+    `
+const fs = require('node:fs')
+const args = process.argv.slice(2)
+if (args.includes('capabilities')) {
+  process.stdout.write(JSON.stringify({ ok: true, outcome: 'success', data: { schemaVersion: 1, protocolVersion: 1, auditMode: 'local_required', capabilities: { eventConsume: true, replyStdin: true, operatorPrivateStdin: true } }, meta: {} }))
+} else if (args.includes('consume')) {
+  process.stderr.write('[event] ready\\nretryable=false\\n')
+  setInterval(() => { if (fs.existsSync(args[0])) process.exit(1) }, 5)
+  process.stdin.resume()
+  process.stdin.on('end', () => process.exit(0))
+} else {
+  let input = ''
+  process.stdin.setEncoding('utf8')
+  process.stdin.on('data', (chunk) => { input += chunk })
+  process.stdin.on('end', () => {
+    const value = JSON.parse(input)
+    process.stdout.write(JSON.stringify({ ok: true, outcome: 'success', data: { openMessageId: 'fixture-late-reply', conversationId: value.conversationId, deliveryStatus: 'delivered', idempotencyKey: value.idempotencyKey }, meta: {} }))
+  })
+}
+`,
+  )
+  let cardsConnected = false
+  const runtime = new DwsDigitalEmployeeSource({
+    employee,
+    stateDir: path.join(root, 'state'),
+    ...invocation,
+    dwsArgsPrefix: [...invocation.dwsArgsPrefix, exitFile],
+    log() {},
+    onMessage() {},
+    onCardAction() {},
+    onStatus: (status) => {
+      cardsConnected = status.state === 'ready'
+    },
+  })
+  t.after(async () => {
+    await runtime.stop()
+    await rm(root, { recursive: true, force: true })
+  })
+  await runtime.start()
+  assert.equal(cardsConnected, true)
+  await writeFile(exitFile, '')
+  await waitFor(() => runtime.currentStatus().state === 'failed')
+  assert.equal(cardsConnected, false)
+  const delivery = await runtime.replySink.reply(
+    {
+      schemaVersion: 1,
+      eventId: 'fixture-late-event',
+      messageId: 'fixture-late-inbound',
+      conversationId: 'allowed-group',
+      conversationType: 'group',
+      senderOpenDingTalkId: 'allowed-open-id',
+      senderName: '夹具成员',
+      text: '夹具请求',
+      createdAt: '1',
+    },
+    'fixture-session',
+    '夹具迟到回复',
+  )
+  assert.equal(delivery.deliveryStatus, 'delivered')
+  assert.equal(runtime.currentStatus().state, 'failed')
+  assert.equal(cardsConnected, false)
+})
+
+test('重连中旧入站完成不能提前恢复 ready，替代订阅必须真正就绪', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-reconnecting-event-'))
+  const stateDir = path.join(root, 'state')
+  const file = (name) => path.join(root, name)
+  const invocation = await writeFakeDwsCommand(
+    root,
+    'reconnecting-event',
+    `
+const fs = require('node:fs')
+const path = require('node:path')
+const args = process.argv.slice(2)
+const file = (name) => path.join(args[0], name)
+const envelope = (data) => process.stdout.write(JSON.stringify({ ok: true, outcome: 'success', data, meta: {} }))
+if (args.includes('capabilities')) {
+  envelope({ schemaVersion: 1, protocolVersion: 1, auditMode: 'local_required', capabilities: { eventConsume: true, replyStdin: true, operatorPrivateStdin: true } })
+} else if (args.includes('consume')) {
+  const count = fs.existsSync(file('consume-count')) ? Number(fs.readFileSync(file('consume-count'), 'utf8')) + 1 : 1
+  fs.writeFileSync(file('consume-count'), String(count))
+  let ready = count === 1
+  let sent = false
+  if (ready) process.stderr.write('[event] ready\\nretryable=true\\n')
+  const timer = setInterval(() => {
+    if (count === 1 && fs.existsSync(file('exit-consumer'))) process.exit(1)
+    if (!ready && fs.existsSync(file('replacement-ready'))) {
+      ready = true
+      process.stderr.write('[event] ready\\n')
+    }
+    if (count === 1 && !sent && fs.existsSync(file('emit-event'))) {
+      sent = true
+      process.stdout.write(JSON.stringify({ type: 'user_im_message_receive_group_all', event_id: 'fixture-delayed-event', message_id: 'fixture-delayed-inbound', conversation_id: 'allowed-group', sender_open_dingtalk_id: 'allowed-open-id', content: '夹具入站', event_time: '1' }) + '\\n')
+    }
+  }, 5)
+  process.stdin.resume()
+  process.stdin.on('end', () => { clearInterval(timer); process.exit(0) })
+} else if (args.includes('reply')) {
+  let input = ''
+  process.stdin.setEncoding('utf8')
+  process.stdin.on('data', (chunk) => { input += chunk })
+  process.stdin.on('end', () => {
+    const value = JSON.parse(input)
+    fs.writeFileSync(file('reply-started'), '')
+    const timer = setInterval(() => {
+      if (!fs.existsSync(file('finish-reply'))) return
+      clearInterval(timer)
+      envelope({ openMessageId: 'fixture-delayed-reply', conversationId: value.conversationId, deliveryStatus: 'delivered', idempotencyKey: value.idempotencyKey })
+    }, 5)
+  })
+}
+`,
+  )
+  const seen = []
+  let cardsConnected = false
+  let reply
+  const runtime = new DwsDigitalEmployeeSource({
+    employee,
+    stateDir,
+    ...invocation,
+    dwsArgsPrefix: [...invocation.dwsArgsPrefix, root],
+    log() {},
+    onMessage: (input) => seen.push(input.event.eventId),
+    onCardAction() {},
+    onStatus: (status) => {
+      cardsConnected = status.state === 'ready'
+    },
+  })
+  t.after(async () => {
+    await writeFile(file('finish-reply'), '')
+    await runtime.stop()
+    await reply
+    await rm(root, { recursive: true, force: true })
+  })
+  await runtime.start()
+  assert.equal(cardsConnected, true)
+  reply = runtime.replySink.reply(
+    {
+      schemaVersion: 1,
+      eventId: 'fixture-pending-reply-event',
+      messageId: 'fixture-pending-reply-inbound',
+      conversationId: 'allowed-group',
+      conversationType: 'group',
+      senderOpenDingTalkId: 'allowed-open-id',
+      senderName: '夹具成员',
+      text: '夹具请求',
+      createdAt: '1',
+    },
+    'fixture-session',
+    '夹具延迟回复',
+  )
+  await waitFor(() =>
+    stat(file('reply-started')).then(
+      () => true,
+      () => false,
+    ),
+  )
+  await writeFile(file('emit-event'), '')
+  // 旧消息通过审计后等待同会话下行，确保订阅断线发生在入站处理尚未完成时。
+  await waitFor(async () => {
+    const entries = (await readFile(path.join(stateDir, 'audit', `${employee.agentUuid}.jsonl`), 'utf8'))
+      .trim()
+      .split('\n')
+      .map(JSON.parse)
+    return entries.some((entry) => entry.eventId === 'fixture-delayed-event' && entry.status === 'accepted')
+  })
+  assert.deepEqual(seen, [])
+  await writeFile(file('exit-consumer'), '')
+  await waitFor(async () => {
+    const count = await readFile(file('consume-count'), 'utf8')
+    return count === '2' && runtime.currentStatus().state === 'connecting'
+  })
+  assert.equal(cardsConnected, false)
+  await writeFile(file('finish-reply'), '')
+  await reply
+  await waitFor(() => seen.length === 1)
+  assert.deepEqual(seen, ['fixture-delayed-event'])
+  assert.equal(runtime.currentStatus().state, 'connecting')
+  assert.equal(cardsConnected, false)
+  assert.equal(typeof runtime.currentStatus().lastEventAt, 'number')
+  await writeFile(file('replacement-ready'), '')
+  await waitFor(() => runtime.currentStatus().state === 'ready')
+  assert.equal(cardsConnected, true)
+})
+
 async function createFakeDws(root, pathCommand = false) {
   const source = `#!/usr/bin/env node
 const fs = require('node:fs')
 const record = process.env.FAKE_DWS_RECORD
 const args = process.argv.slice(2)
+if (args.includes('--help')) {
+  process.stdout.write(process.env.FAKE_DWS_A2UI === '1' ? '--summary --content --a2ui-annotations --open-dingtalk-id --conversation-id --biz-id --flow-status --flatten user_card_action_triggered' : '{}')
+  process.exit(0)
+}
 if (args.includes('--local-lease')) {
   process.stderr.write('[employee] leased\\n')
   process.stdin.resume()
@@ -118,6 +313,10 @@ if (args.includes('--local-lease')) {
 }
 const operation = args.includes('binding') ? 'binding' : args.includes('capabilities') ? 'capabilities' : args.includes('reply') ? 'reply' : args.includes('operator-private') ? 'operator-private' : args.includes('consume') ? 'consume' : 'unknown'
 fs.appendFileSync(record, JSON.stringify({ operation, args, credentialEnvKeys: Object.keys(process.env).filter((key) => /TOKEN|AUTH_?CODE|CLIENT_?SECRET|PASSWORD|CREDENTIAL/i.test(key)) }) + '\\n')
+if (args.includes('send-a2ui-card') || args.includes('update-a2ui-card')) {
+  process.stdout.write(JSON.stringify({ ok: true, data: { bizId: 'host-card' } }))
+  process.exit(0)
+}
 if (operation === 'capabilities') {
   process.stdout.write(JSON.stringify({ ok: true, outcome: 'success', data: { schemaVersion: 1, protocolVersion: 1, auditMode: 'local_required', capabilities: { eventConsume: true, replyStdin: true, operatorPrivateStdin: true } }, meta: {} }))
   process.exit(0)
@@ -126,6 +325,20 @@ if (operation === 'capabilities') {
 let input = ''
 if (operation === 'consume') {
   process.stderr.write('[event] ready event_count=0 bus_pid=123\\n')
+  if (process.env.FAKE_DWS_A2UI === '1' && args.includes('user_card_action_triggered')) {
+    const timer = setInterval(() => {
+      const records = fs.readFileSync(record, 'utf8').trim().split('\\n').map(JSON.parse)
+      const send = records.find((item) => item.args.includes('send-a2ui-card'))
+      const updated = records.some((item) => item.args.includes('update-a2ui-card'))
+      if (!send || !updated) return
+      clearInterval(timer)
+      const components = JSON.parse(send.args[send.args.indexOf('--content') + 1]).map(JSON.parse).find((m) => m.updateComponents).updateComponents.components
+      const interactionId = components.find((c) => c.id === 'submit').action.event.context.interactionId
+      const context = { interactionId, action: 'submit', answers: { q0: { selected: ['option_0'], custom: '' } } }
+      const body = { bizInfoDTO: { bizId: 'host-card' }, operatorDTO: { openDingTalkId: 'allowed-open-id' }, a2uiEvent: { action: { context } } }
+      process.stdout.write(JSON.stringify({ type: 'user_card_action_triggered', payload: { body } }) + '\\n')
+    }, 20)
+  }
   const events = [
     { type: 'user_im_message_receive_group_all', event_id: 'event-allowed', message_id: 'message-allowed', conversation_id: 'allowed-group', sender_open_dingtalk_id: 'allowed-open-id', sender: '成员', content: '只应通过 stdin 回复的正文', event_time: '1' },
     { type: 'user_im_message_receive_group_all', event_id: 'event-allowed', message_id: 'message-allowed', conversation_id: 'allowed-group', sender_open_dingtalk_id: 'allowed-open-id', sender: '成员', content: '重复正文', event_time: '1' },
@@ -139,7 +352,7 @@ if (operation === 'consume') {
     process.stdout.write(first.slice(20) + '\\n')
     process.stdout.write(JSON.stringify(events[1]) + '\\n')
     process.stdout.write(JSON.stringify(events[2]) + '\\n')
-    setTimeout(() => process.stdout.write(JSON.stringify(events[3]) + '\\n'), 50)
+    if (process.env.FAKE_DWS_A2UI !== '1') setTimeout(() => process.stdout.write(JSON.stringify(events[3]) + '\\n'), 50)
   }, 10)
   process.stdin.resume()
   process.stdin.on('end', () => process.exit(0))
@@ -252,7 +465,7 @@ if (args.includes('consume')) {
   return writeFakeDwsCommand(root, 'dws-slow-exit', source)
 }
 
-function createHost() {
+function createHost(interact) {
   const lifecycle = new Context()
   const handlers = new Map()
   const agents = new Map()
@@ -286,7 +499,8 @@ function createHost() {
           ctx: agentCtx,
           followup(message) {
             followups.push({ sessionId: options.sessionId, message })
-            queueMicrotask(() => {
+            queueMicrotask(async () => {
+              await interact?.(agent, scoped)
               emit(
                 'session/event',
                 { id: options.sessionId },
@@ -351,6 +565,94 @@ function pluginConfig(workspace, digitalEmployees) {
     debug: false,
   }
 }
+
+test(
+  '默认 apply 接线并随员工停止释放：原生 ask 回调恢复，未决定的审批取消',
+  { skip: process.platform === 'win32' },
+  async (t) => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-default-a2ui-'))
+    const keys = ['PATH', 'FAKE_DWS_RECORD', 'DSH_DINGTALK_STATE_DIR', 'FAKE_DWS_A2UI']
+    const old = Object.fromEntries(keys.map((key) => [key, process.env[key]]))
+    const binDir = path.join(root, 'bin')
+    await mkdir(binDir)
+    await createFakeDws(binDir, true)
+    const recordFile = path.join(root, 'calls.jsonl')
+    Object.assign(process.env, {
+      PATH: `${binDir}${path.delimiter}${process.env.PATH}`,
+      FAKE_DWS_RECORD: recordFile,
+      DSH_DINGTALK_STATE_DIR: path.join(root, 'state'),
+      FAKE_DWS_A2UI: '1',
+    })
+    const answers = [],
+      errors = []
+    const host = createHost(async (agent, scoped) => {
+      try {
+        answers.push(
+          await scoped.get('user-questions/request')(
+            { agent, questions: [{ id: 'mode', question: '选择模式', options: [{ label: '安全' }] }] },
+            () => assert.fail('不得走下一处理器'),
+          ),
+        )
+      } catch (error) {
+        errors.push(error)
+      }
+    })
+    t.after(async () => {
+      await host.dispose()
+      for (const key of keys) {
+        if (old[key] === undefined) delete process.env[key]
+        else process.env[key] = old[key]
+      }
+      await rm(root, { recursive: true, force: true })
+    })
+    const config = pluginConfig(path.join(root, 'workspace'), [employee])
+    await apply(host.ctx, config)
+    await waitFor(() => answers.length || errors.length)
+    // 原生问答恢复早于最终模型回复和 task_end 审计；必须等整轮收口才能删除工作区。
+    const auditDir = path.join(root, 'state', 'digital-employees', employee.agentUuid, 'audit')
+    await waitFor(async () => {
+      const entries = (await readFile(path.join(auditDir, `${employee.agentUuid}.jsonl`), 'utf8').catch(() => ''))
+        .trim()
+        .split('\n')
+        .filter(Boolean)
+        .map(JSON.parse)
+      const unlocked = await stat(path.join(auditDir, `${employee.agentUuid}.lock`)).then(
+        () => false,
+        () => true,
+      )
+      return unlocked && entries.some((entry) => entry.operationType === 'task_end' && entry.status === 'completed')
+    })
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.deepEqual(errors, [])
+    assert.deepEqual(answers, [{ answers: [{ id: 'mode', selected: ['安全'] }] }])
+    const records = (await readFile(recordFile, 'utf8')).trim().split('\n').map(JSON.parse)
+    assert.ok(records.find((r) => r.operation === 'consume').args.includes('user_card_action_triggered'))
+    assert.equal(records.filter((r) => r.args.includes('send-a2ui-card')).length, 1)
+    const session = host.sessions[0]
+    const agent = host.ctx.agents.get(session.sessionId)
+    const approval = session.scoped.get('approval/request')({ agent, toolName: 'fixture_pending_tool' }, () =>
+      assert.fail('不得另开授权通道'),
+    )
+    await waitFor(async () => {
+      const calls = (await readFile(recordFile, 'utf8')).trim().split('\n').map(JSON.parse)
+      // 等发卡结果已确认并进入等待态，再验证停止会重绘已送达的卡片。
+      return (
+        calls.filter((call) => call.args.includes('send-a2ui-card')).length === 2 &&
+        calls.filter((call) => call.args.includes('update-a2ui-card') && call.args.includes('CONFIRMING')).length === 2
+      )
+    })
+    await host.dispose()
+    assert.equal(await approval, 'cancelled')
+    const stoppedCalls = (await readFile(recordFile, 'utf8')).trim().split('\n').map(JSON.parse)
+    assert.ok(stoppedCalls.some((call) => call.args.includes('update-a2ui-card') && call.args.includes('ABORTED')))
+    const status = JSON.parse(
+      await readFile(path.join(root, 'state', 'digital-employees', employee.agentUuid, 'runtime.json'), 'utf8'),
+    )
+    assert.equal(status.state, 'stopped')
+    assert.equal(session.scoped.has('approval/request'), false)
+    assert.equal(session.scoped.has('user-questions/request'), false)
+  },
+)
 
 test('fake DWS 验证 ready、半行/坏包隔离、白名单、去重、自回复 ledger 和安全 stdin', async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-dingtalk-de-runtime-'))

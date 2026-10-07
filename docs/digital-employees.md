@@ -1,6 +1,6 @@
 # DSH 数字员工 Channel
 
-数字员工是与现有机器人平级的独立 Channel。机器人模式不依赖 DWS；只有启用了 `digitalEmployees[]` 的员工才要求本机安装兼容 DWS。首期仅支持文本事件和文本引用回复，多员工从第一版开始隔离运行。
+数字员工是与现有机器人平级的独立 Channel。机器人模式不依赖 DWS；只有启用了 `digitalEmployees[]` 的员工才要求本机安装兼容 DWS。普通消息使用文本事件和文本引用回复；审批／提问默认优先 A2UI，能力缺失时降级文字。多员工隔离运行。
 
 > 发布门禁：DSH fake 已对齐 DWS 的真实 ready、snake_case 事件、统一 JSON envelope 与 Channel 命令路径。仍须固定 DWS/DSH/DEAP 精确 SHA 做真实组织联合验收；缺少任一能力或本地审计不可写时，该员工 fail-closed，机器人和其他员工不受影响。
 
@@ -30,6 +30,8 @@ DSH 提供 `digital-employee runtime --stdin --json` 私有机器入口。输入
 
 停止顺序：禁止新任务并丢弃未执行队列 → 取消审批/问题等待 → 停 Consumer → 取消并 dispose 本 Channel 自己创建/恢复的 Agent → 等待回合、事件与所有下行调用结束 → 移除监听 → 最后释放 lease。借用 Web UI 所有的运行实例会被拒绝，不 dispose 其他实例。无法确认释放时保留阻塞状态，不承诺换绑成功。
 
+A2UI 与文字审批/问答都随目标员工停止取消。决定审计和终态卡片更新排空后才确认释放；迟到回复与重连期间完成的旧入站不能恢复 ready，仅真实订阅就绪才能恢复连接状态。
+
 正常释放由宿主向 lease stdin 写入 `released` 确认。异常 EOF 或 lease 崩溃在 DWS 留下私有隔离标记，新实例即使取得文件锁也不能启动。仅原 `runtimeInstanceId` 的停止确认可以解除隔离；宿主已崩溃而无法取得确认时保持 blocked，不提供自动或强制接管。
 
 插件通过 Cordis `ctx.effect` 管理控制入口和机器人 Stream 的获取与释放；卸载、重载和宿主正常退出会等待异步清理，包括仍在初始化的资源。不能用普通 `ctx.on('dispose')` 事件代替该生命周期。退出宽限内无法完成释放时仍按异常退出处理；升级插件不会自动清除旧版本遗留的租约隔离标记。
@@ -54,7 +56,7 @@ DSH 启动每个员工前先执行只读能力探测，要求 DWS 同时声明�
 - `auditMode=local_required`；
 - `protocolVersion: 1`。
 
-事件进程固定使用参数数组启动，不经过 shell：
+事件进程固定使用参数数组启动，不经过 shell；A2UI 能力预检通过时还订阅 `user_card_action_triggered`，控制回调独立于模型任务队列：
 
 ```text
 dws --profile <corpId:userId> event consume
@@ -86,7 +88,7 @@ DSH 同时排空 stdout/stderr，只有 ready 行匹配 `^\[event\] ready(?:\s|$
 
 - 单聊只接受 operator 或 `allowedDirectSenders`；群聊只接受 `allowedGroups`。
 - 未授权消息静默丢弃，只上报无正文的拒绝审计。
-- 敏感操作通过 operator 私聊的一次性确认码审批；白名单普通成员不能批准。
+- 敏感操作优先通过 operator 私聊的 A2UI 卡片审批；能力不可用时使用 operator 私聊一次性确认码。白名单普通成员不能批准。
 - 会话键包含 `agentUuid + conversationId`；`chat-sender` 还包含发送者身份。
 - 每个员工拥有独立的进程、Queue、Session binding、事件 ledger、发送消息 ledger 和 `0700/0600` 状态目录。
 - 事件按 `eventId` 持久化去重；已发送 `openMessageId` 用于阻断回复回环。
@@ -111,4 +113,4 @@ DSH 同时排空 stdout/stderr，只有 ready 行匹配 `^\[event\] ready(?:\s|$
 
 联合验收使用固定 DSH/DWS/DEAP SHA，依次覆盖机器人无 DWS 基线、一次 connect、四类白名单消息、唯一 Session/回复/审计、重启恢复、双员工隔离和故障注入。完整步骤见 [验收清单](acceptance-checklist.md)。
 
-业务 ack/replay/cursor 未完成前只能声明“可用 MVP”，不能承诺 exactly-once 或不丢消息。AI Card、图片、文件、语音、互动卡片审批和无 DWS 运行模式均后置。
+业务 ack/replay/cursor 未完成前只能声明“可用 MVP”，不能承诺 exactly-once 或不丢消息。A2UI 审批／提问的能力要求、降级条件与局限见 [交互说明](a2ui-interactions.md)。普通回复的 AI Card、图片、文件、语音和无 DWS 运行模式仍后置。

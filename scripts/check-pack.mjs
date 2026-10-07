@@ -43,6 +43,8 @@ const required = [
   'cordis.patch.yml',
   'lib/index.js',
   'lib/bin.js',
+  'lib/a2ui.js',
+  'lib/a2ui.d.ts',
 ]
 const missing = required.filter((file) => !files.includes(file))
 if (missing.length) throw new Error(`NPM tarball 缺少必需文件：${missing.join(', ')}`)
@@ -64,6 +66,18 @@ try {
     path.join(stagedPackage, 'node_modules'),
     process.platform === 'win32' ? 'junction' : 'dir',
   )
+
+  const a2ui = spawnSync(
+    process.execPath,
+    [
+      '--input-type=module',
+      '-e',
+      `import { A2uiInteractions } from '@dingtalk-real-ai/dsh-dingtalk/a2ui';
+     if (typeof A2uiInteractions !== 'function') process.exit(1);`,
+    ],
+    { cwd: stagedPackage, encoding: 'utf8' },
+  )
+  if (a2ui.status !== 0) throw new Error(a2ui.stderr || 'NPM tarball 无法导入 A2UI 子路径')
 
   const dshHome = path.join(stagingRoot, '.dsh')
   const profile = path.join(dshHome, 'profiles', 'web')

@@ -38,6 +38,9 @@ export interface DigitalEmployeeRuntimeOptions {
   readyTimeoutMs?: number
   log(line: string): void
   onMessage(input: DigitalEmployeeInbound): void | Promise<void>
+  onCardAction?(event: unknown): void
+  /** 仅订阅启动失败且尚未发卡时调用，撤销 A2UI 后再启动原文字订阅。 */
+  onCardUnavailable?(): void
   onStatus?(status: DigitalEmployeeRuntimeStatus): void
 }
 
@@ -108,6 +111,8 @@ export class DwsDigitalEmployeeSource implements InboundSource {
   private child?: ChildProcessWithoutNullStreams
   private readonly childClosed = new WeakMap<ChildProcessWithoutNullStreams, Promise<void>>()
   private stopped = false
+  private cardsDisabled = false
+  private cardSubscriptionReady = false
   private status: DigitalEmployeeRuntimeStatus = { state: 'probing', observedAt: Date.now() }
   private readonly ledger: DigitalEmployeeLedger
   private eventChain = Promise.resolve()
@@ -135,7 +140,8 @@ export class DwsDigitalEmployeeSource implements InboundSource {
       ledger: this.ledger,
       auditSink: new LocalDigitalEmployeeAuditLog(options.stateDir, options.employee.agentUuid),
       onFailure: (code) => this.fail(code),
-      onReply: () => this.updateStatus({ state: 'ready', lastReplyAt: Date.now() }),
+      // 回复成功只更新时间，不能把断线、失败或停止的事件订阅重新标成 ready。
+      onReply: () => this.updateStatus({ lastReplyAt: Date.now() }),
       onAudit: () => this.updateStatus({ lastAuditAt: Date.now() }),
     })
   }
@@ -148,6 +154,19 @@ export class DwsDigitalEmployeeSource implements InboundSource {
       try {
         await this.startConsumer()
       } catch (error) {
+        if (
+          this.options.onCardAction &&
+          this.options.onCardUnavailable &&
+          !this.cardSubscriptionReady &&
+          !this.stopped
+        ) {
+          if (this.child) await this.terminateChild(this.child)
+          this.cardsDisabled = true
+          this.options.onCardUnavailable()
+          this.options.log('a2ui subscription unavailable before delivery; using text interactions')
+          await this.startConsumer()
+          return
+        }
         if (!(await this.retryConsumer(this.lastRetryable))) throw error
       }
     } catch (error) {
@@ -174,7 +193,7 @@ export class DwsDigitalEmployeeSource implements InboundSource {
     await this.replySink.probe()
     this.updateStatus({
       capabilitiesVerifiedAt: Date.now(),
-      subscriptionTopics: ['user_im_message_receive_o2o_all', 'user_im_message_receive_group_all'],
+      subscriptionTopics: this.subscriptionTopics(),
     })
   }
 
@@ -186,8 +205,7 @@ export class DwsDigitalEmployeeSource implements InboundSource {
       this.options.employee.dwsProfile,
       'event',
       'consume',
-      'user_im_message_receive_o2o_all',
-      'user_im_message_receive_group_all',
+      ...this.subscriptionTopics(),
       '--flatten',
       '--format',
       'ndjson',
@@ -206,9 +224,11 @@ export class DwsDigitalEmployeeSource implements InboundSource {
     let retryable: boolean | undefined
     let readyTimedOut = false
     const consumeLine = (line: string, stream: 'stdout' | 'stderr') => {
+      if (this.stopped) return
       if (READY_LINE.test(line)) {
         ready = true
-        this.updateStatus({ state: 'ready' })
+        if (this.options.onCardAction && !this.cardsDisabled) this.cardSubscriptionReady = true
+        this.updateStatus({ state: 'ready', subscriptionTopics: this.subscriptionTopics() })
         this.startHeartbeat()
         return
       }
@@ -226,12 +246,17 @@ export class DwsDigitalEmployeeSource implements InboundSource {
         this.options.log('event parse rejected (invalid_json)')
         return
       }
+      // 卡片控制事件不得等待正在阻塞于审批/问答的普通消息队列。
+      if ((value as { type?: string })?.type === 'user_card_action_triggered') {
+        if (!this.stopped && !this.cardsDisabled) this.options.onCardAction?.(value)
+        return
+      }
       this.eventChain = this.eventChain
         .then(() => this.handleEvent(parseEvent(value)))
         .catch((error) => this.options.log(`event rejected (${error instanceof Error ? error.message : 'unknown'})`))
     }
-    const drain = (chunk: Buffer, stream: 'stdout' | 'stderr') => {
-      let buffer = (stream === 'stdout' ? stdoutBuffer : stderrBuffer) + chunk.toString('utf8')
+    const drain = (chunk: string, stream: 'stdout' | 'stderr') => {
+      let buffer = (stream === 'stdout' ? stdoutBuffer : stderrBuffer) + chunk
       for (;;) {
         const index = buffer.indexOf('\n')
         if (index < 0) break
@@ -255,8 +280,11 @@ export class DwsDigitalEmployeeSource implements InboundSource {
       if (stream === 'stdout') stdoutBuffer = buffer
       else stderrBuffer = buffer
     }
-    child.stdout.on('data', (chunk: Buffer) => drain(chunk, 'stdout'))
-    child.stderr.on('data', (chunk: Buffer) => drain(chunk, 'stderr'))
+    // 流式解码保留跨 chunk 的 UTF-8 字节，避免中文表单回答被替换成乱码。
+    child.stdout.setEncoding('utf8')
+    child.stderr.setEncoding('utf8')
+    child.stdout.on('data', (chunk: string) => drain(chunk, 'stdout'))
+    child.stderr.on('data', (chunk: string) => drain(chunk, 'stderr'))
 
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -293,6 +321,14 @@ export class DwsDigitalEmployeeSource implements InboundSource {
 
   private retryBudget(retryable: boolean | undefined): number {
     return retryable === false ? 0 : retryable === true ? 2 : 1
+  }
+
+  private subscriptionTopics(): string[] {
+    return [
+      'user_im_message_receive_o2o_all',
+      'user_im_message_receive_group_all',
+      ...(this.options.onCardAction && !this.cardsDisabled ? ['user_card_action_triggered'] : []),
+    ]
   }
 
   private async retryConsumer(retryable: boolean | undefined): Promise<boolean> {
@@ -334,7 +370,8 @@ export class DwsDigitalEmployeeSource implements InboundSource {
     if (this.stopped) return
     if (this.status.state === 'failed') throw new Error('digital_employee_fail_closed')
     this.ledger.markEvent(event.eventId)
-    this.updateStatus({ state: 'ready', lastEventAt: Date.now() })
+    // 旧入站可能等到重连期间才完成；只有新订阅的 ready 行能恢复连接状态。
+    this.updateStatus({ lastEventAt: Date.now() })
     void Promise.resolve(
       this.options.onMessage({
         event,

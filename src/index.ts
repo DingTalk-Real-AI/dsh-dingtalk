@@ -40,6 +40,7 @@ import { EmployeeLease } from './digital-employee-lease.js'
 import { cardTarget } from './targets.js'
 import { DwsDigitalEmployeeSource, type DigitalEmployeeInbound } from './digital-employee-runtime.js'
 import { DigitalEmployeeApprovalManager, DigitalEmployeeTextRenderer } from './digital-employee-renderer.js'
+import { employeeA2ui } from './digital-employee-a2ui.js'
 import { routeDigitalEmployeePreTask } from './digital-employee-routing.js'
 import { BotReplySink } from './reply-sink.js'
 import { RobotStreamSource } from './inbound-source.js'
@@ -207,11 +208,23 @@ async function startDigitalEmployee(
   let commands!: Commands
   let stopping = false
   const callbacks = new Set<Promise<unknown>>()
+  const a2ui = employeeA2ui(employee, config.approvalTimeoutMs, log, {
+    questionTimeoutMs: config.questionTimeoutMs,
+    audit: (fields) => runtime.replySink.audit(fields),
+  })
+  const useCards = config.interactionMode !== 'text' && (await a2ui.prepare())
+  const installInteractions = (agentCtx: HostAgentContext) => {
+    approvals.install(agentCtx)
+    a2ui.install(agentCtx)
+  }
 
   const runtime = new DwsDigitalEmployeeSource({
     employee,
     stateDir,
     log,
+    onCardAction: useCards ? (event) => a2ui.handleEvent(event) : undefined,
+    onCardUnavailable: () => a2ui.disable(),
+    onStatus: (status) => a2ui.setConnected(status.state === 'ready'),
     onMessage: (input) => {
       if (stopping) return
       const task = handleMessage(input)
@@ -262,6 +275,7 @@ async function startDigitalEmployee(
     employee.operatorOpenDingTalkId,
     config.approvalTimeoutMs,
     log,
+    config.questionTimeoutMs,
   )
   commands = new Commands({
     agents,
@@ -302,7 +316,8 @@ async function startDigitalEmployee(
     connectorStatus: () => {
       const status = runtime.currentStatus()
       return [
-        `Channel：数字员工文本模式（protocol 1）`,
+        `Channel：数字员工（protocol 1）`,
+        `审批/提问：${a2ui.available() ? 'A2UI 优先' : '文字交互（能力不可用或已配置 text）'}`,
         `DWS Profile：${employee.dwsProfile}`,
         `事件进程：${status.state}`,
         `额外私聊白名单：${employee.allowedDirectSenders.length} 人`,
@@ -325,6 +340,8 @@ async function startDigitalEmployee(
       eventsByMessageId.delete(msg.msgId)
       if (event) {
         approvals.bindSession(agent.id, event)
+        a2ui.bindSession(agent.id, event)
+        installInteractions(agent.ctx)
         await replySink.audit({
           eventId: event.eventId,
           sessionId: agent.id,
@@ -336,19 +353,19 @@ async function startDigitalEmployee(
     },
     compose: async () => {
       const presets = (ctx as any).get?.('agentPresets') as HostAgentPresets | undefined
-      if (!presets) return { setup: async (agentCtx: HostAgentContext) => approvals.install(agentCtx) }
+      if (!presets) return { setup: async (agentCtx: HostAgentContext) => installInteractions(agentCtx) }
       try {
         const resolved = await presets.resolve(undefined)
         return {
           agentPreset: resolved.id,
           setup: async (agentCtx: HostAgentContext) => {
             await presets.mount(agentCtx, resolved.id)
-            approvals.install(agentCtx)
+            installInteractions(agentCtx)
           },
         }
       } catch (error) {
         log(`preset compose failed (${error instanceof Error ? error.message : error})`)
-        return { setup: async (agentCtx: HostAgentContext) => approvals.install(agentCtx) }
+        return { setup: async (agentCtx: HostAgentContext) => installInteractions(agentCtx) }
       }
     },
   })
@@ -368,7 +385,7 @@ async function startDigitalEmployee(
         await lease.start()
         if (stopping) throw new Error('employee_stopping')
         await runtime.start()
-        log(`channel up: profile=${employee.dwsProfile} protocol=1 text-only`)
+        log(`channel up: profile=${employee.dwsProfile} protocol=1 interactions=${a2ui.available() ? 'a2ui' : 'text'}`)
       } catch (error) {
         await ownedRuntime.stop()
         throw error
@@ -379,6 +396,7 @@ async function startDigitalEmployee(
       (stopPromise ??= (async () => {
         stopping = true
         queue.close()
+        a2ui.close()
         approvals.close()
         const sourceStopped = runtime.stop()
         // dispose 的确认只覆盖本 Bridge 创建/恢复的 Agent，不触碰其他宿主实例。
@@ -387,6 +405,7 @@ async function startDigitalEmployee(
         await queue.drain()
         await Promise.allSettled([...callbacks])
         await replySink.drain()
+        await a2ui.drain()
         if (typeof detach === 'function') detach()
         await lease.stop()
       })()),

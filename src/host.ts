@@ -118,6 +118,7 @@ export interface HostAgentContext {
       request: HostUserQuestionRequest,
       next: () => Promise<HostUserQuestionAnswer>,
     ) => Promise<HostUserQuestionAnswer>,
+    options?: { readonly prepend?: boolean },
   ): () => void
   /** Register a fail-closed approval answerer scoped to this Agent. */
   on(

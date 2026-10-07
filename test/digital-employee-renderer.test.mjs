@@ -157,8 +157,9 @@ test('DSH 原生用户问题通过文本 ReplySink 提问，并只消费原会�
     },
   }
   const manager = new DigitalEmployeeApprovalManager(runtime, 'operator-open-id', 1_000, () => {})
+  const agent = { id: 'session-question' }
   manager.install({
-    agent: { id: 'session-question' },
+    agent,
     on(name, listener) {
       listeners.set(name, listener)
       return () => listeners.delete(name)
@@ -167,7 +168,7 @@ test('DSH 原生用户问题通过文本 ReplySink 提问，并只消费原会�
   manager.bindSession('session-question', event)
   const response = listeners.get('user-questions/request')(
     {
-      agent: { id: 'session-question' },
+      agent,
       questions: [
         {
           id: 'choice',
@@ -194,4 +195,107 @@ test('DSH 原生用户问题通过文本 ReplySink 提问，并只消费原会�
   )
   assert.equal(await manager.handleInbound({ event: answerEvent, message, scopeKey: 'x' }), true)
   assert.deepEqual(await response, { answers: [{ id: 'choice', selected: ['快速模式'] }] })
+})
+
+test('文字降级的取消、超时、未知投递和关闭均不调用下一授权通道，迟到回复不能恢复', async (t) => {
+  for (const scenario of ['abort', 'timeout', 'unknown', 'close'])
+    await t.test(scenario, async () => {
+      const listeners = new Map(),
+        prompts = []
+      const sink = {
+        async operatorPrivate(text) {
+          prompts.push(text)
+          return { deliveryStatus: scenario === 'unknown' ? 'unknown' : 'delivered' }
+        },
+        async reply(_event, _session, text) {
+          prompts.push(text)
+          return { deliveryStatus: scenario === 'unknown' ? 'unknown' : 'delivered' }
+        },
+        async audit() {},
+      }
+      const agent = { id: 'fixture' }
+      const manager = new DigitalEmployeeApprovalManager(sink, 'operator', 30, () => {})
+      manager.bindSession(agent.id, event)
+      manager.install({
+        agent,
+        on(name, listener) {
+          listeners.set(name, listener)
+          return () => listeners.delete(name)
+        },
+      })
+      const abort = new AbortController()
+      const result = listeners.get('approval/request')({ agent, toolName: 'fixture', signal: abort.signal }, () =>
+        assert.fail('不得降级到 Web'),
+      )
+      while (!prompts.length) await new Promise((resolve) => setImmediate(resolve))
+      if (scenario === 'abort') abort.abort()
+      if (scenario === 'close') manager.close()
+      assert.equal(await result, ['abort', 'close'].includes(scenario) ? 'cancelled' : 'unavailable')
+      const code = prompts[0].match(/确认 ([A-F0-9]{6})/)[1]
+      assert.equal(
+        await manager.handleInbound({ event: { ...event, senderOpenDingTalkId: 'operator', text: `确认 ${code}` } }),
+        false,
+      )
+      if (scenario !== 'close') {
+        const questionAbort = new AbortController()
+        const answer = listeners.get('user-questions/request')(
+          { agent, questions: [{ id: 'q', question: '选择' }], signal: questionAbort.signal },
+          () => assert.fail('不得降级到 Web'),
+        )
+        const rejected = assert.rejects(answer, /question_cancelled_or_unavailable/)
+        if (scenario === 'abort') questionAbort.abort()
+        await rejected
+        assert.equal(await manager.handleInbound({ event: { ...event, text: '迟到回答' } }), false)
+      }
+      manager.close()
+    })
+})
+
+test('文字审批审计等待中取消，审计晚返回不能放行；重复安装不重复发问', async () => {
+  let releaseAudit
+  const audit = new Promise((resolve) => {
+    releaseAudit = resolve
+  })
+  const listeners = new Map(),
+    prompts = []
+  const agent = { id: 'fixture' }
+  const manager = new DigitalEmployeeApprovalManager(
+    {
+      async operatorPrivate(text) {
+        prompts.push(text)
+        return { deliveryStatus: 'delivered' }
+      },
+      async audit(fields) {
+        if (fields.operationType === 'approval_response') await audit
+      },
+    },
+    'operator',
+    1000,
+    () => {},
+  )
+  const ctx = {
+    agent,
+    on(name, listener) {
+      assert.ok(!listeners.has(name))
+      listeners.set(name, listener)
+      return () => listeners.delete(name)
+    },
+  }
+  manager.install(ctx)
+  manager.install(ctx)
+  manager.bindSession(agent.id, event)
+  const abort = new AbortController()
+  const result = listeners.get('approval/request')({ agent, toolName: 'fixture', signal: abort.signal }, () =>
+    assert.fail(),
+  )
+  while (!prompts.length) await new Promise((resolve) => setImmediate(resolve))
+  const code = prompts[0].match(/确认 ([A-F0-9]{6})/)[1]
+  const response = manager.handleInbound({
+    event: { ...event, senderOpenDingTalkId: 'operator', text: `确认 ${code}` },
+  })
+  abort.abort()
+  assert.equal(await result, 'cancelled')
+  releaseAudit()
+  await response
+  manager.close()
 })
