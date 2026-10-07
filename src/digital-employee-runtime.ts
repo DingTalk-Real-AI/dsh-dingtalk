@@ -140,7 +140,8 @@ export class DwsDigitalEmployeeSource implements InboundSource {
       ledger: this.ledger,
       auditSink: new LocalDigitalEmployeeAuditLog(options.stateDir, options.employee.agentUuid),
       onFailure: (code) => this.fail(code),
-      onReply: () => this.updateStatus({ state: 'ready', lastReplyAt: Date.now() }),
+      // 回复成功只更新时间，不能把断线、失败或停止的事件订阅重新标成 ready。
+      onReply: () => this.updateStatus({ lastReplyAt: Date.now() }),
       onAudit: () => this.updateStatus({ lastAuditAt: Date.now() }),
     })
   }

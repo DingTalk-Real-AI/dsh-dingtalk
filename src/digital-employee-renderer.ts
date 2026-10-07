@@ -40,6 +40,15 @@ export class DigitalEmployeeTextRenderer {
     this.pendingEvents.delete(messageId)
   }
 
+  releaseOwned(sessionIds: string[]): void {
+    for (const id of sessionIds) {
+      const state = this.states.get(id)
+      this.states.delete(id)
+      state?.settle()
+    }
+    this.pendingEvents.clear()
+  }
+
   onInbound(sessionId: string, msg: InboundMessage): Promise<void> {
     const event = this.pendingEvents.get(msg.msgId)
     this.pendingEvents.delete(msg.msgId)

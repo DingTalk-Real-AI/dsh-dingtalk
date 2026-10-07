@@ -238,6 +238,89 @@ function event(card, action, overrides = {}) {
   }
 }
 
+test('问答提交、取消、超时和关闭后的只读回执保留完整请求详情', async (t) => {
+  const detail = '**夹具方案**\n\n1. 先做只读检查。\n2. 核对结果后再决定后续操作。'
+  for (const mode of ['submit', 'cancel', 'timeout', 'close']) {
+    await t.test(mode, async (t) => {
+      const h = harness({ timeoutMs: mode === 'timeout' ? 40 : 10_000 })
+      t.after(() => h.manager.close())
+      const result = h.manager.ask('session-1', { questions: [{ id: 'plan', question: '是否接受这个方案？', detail }] })
+      void result.catch(() => {})
+      await ready()
+      const initial = h.sent[0].messages[0].updateComponents.components
+      assert.equal(initial.find((component) => component.id === 'q0_detail').content, detail)
+      if (mode === 'submit' || mode === 'cancel') {
+        assert.equal(
+          h.manager.handleEvent(
+            'account-1',
+            event(h.sent[0], mode, { answers: { q0: { selected: [], custom: '夹具意见' } } }),
+          ),
+          true,
+        )
+      } else if (mode === 'close') h.manager.close()
+      if (mode === 'submit') await result
+      else await assert.rejects(result, /a2ui_question_(cancelled|unavailable)/)
+      await ready()
+      const receipt = h.updated.at(-1).messages[0].updateComponents.components
+      assert.equal(receipt.find((component) => component.id === 'q0_detail')?.content, detail)
+      assert.ok(receipt.find((component) => component.id === 'root').children.includes('q0_detail'))
+      assert.equal(
+        receipt.some((component) => ['Button', 'ChoicePicker', 'TextField'].includes(component.component)),
+        false,
+      )
+    })
+  }
+})
+
+test('决定提交期间保持等待，重复点击、取消、超时和撤权不能晚到批准', async (t) => {
+  for (const mode of ['success', 'abort', 'timeout', 'revoke', 'close']) {
+    await t.test(mode, async (t) => {
+      let route = { target: { type: 'user', id: 'recipient-1' }, operatorUid: '123', bindingId: 'binding-1' }
+      const h = harness({ timeoutMs: mode === 'timeout' ? 100 : 10_000, route: () => route })
+      let releaseCommit
+      const committed = new Promise((resolve) => {
+        releaseCommit = resolve
+      })
+      let decisions = 0
+      t.after(() => {
+        h.manager.close()
+        releaseCommit()
+      })
+      const signal = new AbortController()
+      const result = h.manager.approve(
+        { agent: h.agent, toolName: 'fixture_tool', signal: signal.signal },
+        async () => {
+          decisions++
+          await committed
+        },
+      )
+      let settled = false
+      void result.then(() => {
+        settled = true
+      })
+      await ready()
+      assert.equal(h.manager.handleEvent('account-1', event(h.sent[0], 'approve_once')), true)
+      assert.equal(h.manager.handleEvent('account-1', event(h.sent[0], 'reject')), false)
+      await ready()
+      assert.equal(decisions, 1)
+      assert.equal(settled, false)
+      assert.equal(h.updated.length, 0)
+      if (mode === 'abort') signal.abort()
+      else if (mode === 'close') h.manager.close()
+      else if (mode === 'revoke') route = { ...route, bindingId: 'binding-2' }
+      if (mode === 'success' || mode === 'revoke') releaseCommit()
+      const expected =
+        mode === 'success' ? 'allowed-once' : mode === 'abort' || mode === 'close' ? 'cancelled' : 'unavailable'
+      assert.equal(await result, expected)
+      releaseCommit()
+      await ready()
+      assert.equal(h.updated.length, 1)
+      assert.equal(h.updated[0].presentation.state, mode === 'timeout' ? 'timed-out' : expected)
+      assert.equal(h.manager.handleEvent('account-1', event(h.sent[0], 'approve_once')), false)
+    })
+  }
+})
+
 // 按端上实际回调结构缩减，所有业务、会话和身份值均为测试数据。
 function atomicEvent(card, action, overrides = {}) {
   return {

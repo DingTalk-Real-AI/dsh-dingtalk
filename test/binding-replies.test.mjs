@@ -4,6 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test, { mock } from 'node:test'
+import { Context } from '@deepseek-ai/cordis'
 
 function config(workspace) {
   return {
@@ -56,8 +57,12 @@ function delivery(messageId, text, sessionWebhook, createAt) {
 }
 
 test('同一私聊按顺序回复格式错误、Unicode 绑定成功和后续状态', async (t) => {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-dingtalk-binding-replies-'))
-  t.after(() => rm(root, { recursive: true, force: true }))
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-binding-'))
+  const lifecycle = new Context()
+  t.after(async () => {
+    await lifecycle.fiber.dispose()
+    await rm(root, { recursive: true, force: true })
+  })
   const previousStateDir = process.env.DSH_DINGTALK_STATE_DIR
   process.env.DSH_DINGTALK_STATE_DIR = path.join(root, 'state')
   t.after(() => {
@@ -108,9 +113,9 @@ test('同一私聊按顺序回复格式错误、Unicode 绑定成功和后续状
   const { issueBindingChallenge } = await import('../lib/owner.js')
   const challenge = issueBindingChallenge(path.join(root, 'state', 'owner.json'), 60_000)
   const { apply } = await import(`../lib/index.js?binding-replies=${Date.now()}`)
-  const dispose = []
   const workspace = { path: root, sessionIds: [], async attachSession() {} }
   const ctx = {
+    effect: (...args) => lifecycle.effect(...args),
     credentials: { async resolve() {} },
     agents: {},
     agentDefaultModel: { currentSelection: () => undefined },
@@ -121,13 +126,10 @@ test('同一私聊按顺序回复格式错误、Unicode 绑定成功和后续状
       if (name === 'sessionPersistence') return { list: async () => [] }
       return undefined
     },
-    on(event, listener) {
-      if (event === 'dispose') dispose.push(listener)
-    },
+    on: (...args) => lifecycle.on(...args),
   }
 
   await apply(ctx, config(root))
-  t.after(() => dispose.forEach((listener) => listener()))
 
   await robotListener(delivery('malformed-1', '/bind', 'https://reply.test/malformed', '500'))
   assert.deepEqual(

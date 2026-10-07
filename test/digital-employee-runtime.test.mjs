@@ -3,6 +3,7 @@ import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/pr
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
+import { Context } from '@deepseek-ai/cordis'
 
 import { authorizeDigitalEmployeeEvent, DwsDigitalEmployeeSource } from '../lib/digital-employee-runtime.js'
 import { apply } from '../lib/index.js'
@@ -29,6 +30,8 @@ const employee = {
 
 async function writeFakeDwsCommand(root, name, source, pathCommand = false) {
   if (pathCommand) {
+    // 仓库内 TMPDIR 会继承 ESM；无扩展名的 fake CLI 仍应按 CommonJS 执行。
+    await writeFile(path.join(root, 'package.json'), JSON.stringify({ type: 'commonjs' }))
     const command = path.join(root, name)
     await writeFile(command, source, { mode: 0o755 })
     await chmod(command, 0o755)
@@ -38,6 +41,34 @@ async function writeFakeDwsCommand(root, name, source, pathCommand = false) {
   await writeFile(script, source, 'utf8')
   return { dwsCommand: process.execPath, dwsArgsPrefix: [script] }
 }
+
+test('已通过信号退出的 Consumer 在启动失败后仍能完成 stop', { skip: process.platform === 'win32' }, async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-signaled-'))
+  const invocation = await writeFakeDwsCommand(
+    root,
+    'signal-exit',
+    "process.stderr.write('retryable=false\\n', () => process.kill(process.pid, 'SIGTERM'))\n",
+  )
+  const runtime = new DwsDigitalEmployeeSource({
+    employee,
+    stateDir: path.join(root, 'state'),
+    ...invocation,
+    log() {},
+    onMessage() {},
+  })
+  runtime.replySink.probe = async () => {}
+  t.after(async () => {
+    await runtime.stop()
+    await rm(root, { recursive: true, force: true })
+  })
+  await assert.rejects(runtime.start(), /event_consumer_exited_before_ready/)
+  const stopped = await Promise.race([
+    runtime.stop().then(() => true),
+    new Promise((resolve) => setTimeout(() => resolve(false), 200)),
+  ])
+  assert.equal(stopped, true, 'close 已发生，stop 不应再次等待同一 close 事件')
+  assert.equal(runtime.currentStatus().state, 'stopped')
+})
 
 test('本地白名单分别覆盖 operator、额外私聊、群白名单和默认拒绝', () => {
   const base = {
@@ -73,6 +104,75 @@ test('本地白名单分别覆盖 operator、额外私聊、群白名单和默�
   )
 })
 
+test('订阅断线后的迟到成功回复不能恢复 ready 或重新开启卡片交互', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-disconnected-reply-'))
+  const exitFile = path.join(root, 'exit-consumer')
+  const invocation = await writeFakeDwsCommand(
+    root,
+    'disconnected-reply',
+    `
+const fs = require('node:fs')
+const args = process.argv.slice(2)
+if (args.includes('capabilities')) {
+  process.stdout.write(JSON.stringify({ ok: true, outcome: 'success', data: { schemaVersion: 1, protocolVersion: 1, auditMode: 'local_required', capabilities: { eventConsume: true, replyStdin: true, operatorPrivateStdin: true } }, meta: {} }))
+} else if (args.includes('consume')) {
+  process.stderr.write('[event] ready\\nretryable=false\\n')
+  setInterval(() => { if (fs.existsSync(args[0])) process.exit(1) }, 5)
+  process.stdin.resume()
+  process.stdin.on('end', () => process.exit(0))
+} else {
+  let input = ''
+  process.stdin.setEncoding('utf8')
+  process.stdin.on('data', (chunk) => { input += chunk })
+  process.stdin.on('end', () => {
+    const value = JSON.parse(input)
+    process.stdout.write(JSON.stringify({ ok: true, outcome: 'success', data: { openMessageId: 'fixture-late-reply', conversationId: value.conversationId, deliveryStatus: 'delivered', idempotencyKey: value.idempotencyKey }, meta: {} }))
+  })
+}
+`,
+  )
+  let cardsConnected = false
+  const runtime = new DwsDigitalEmployeeSource({
+    employee,
+    stateDir: path.join(root, 'state'),
+    ...invocation,
+    dwsArgsPrefix: [...invocation.dwsArgsPrefix, exitFile],
+    log() {},
+    onMessage() {},
+    onCardAction() {},
+    onStatus: (status) => {
+      cardsConnected = status.state === 'ready'
+    },
+  })
+  t.after(async () => {
+    await runtime.stop()
+    await rm(root, { recursive: true, force: true })
+  })
+  await runtime.start()
+  assert.equal(cardsConnected, true)
+  await writeFile(exitFile, '')
+  await waitFor(() => runtime.currentStatus().state === 'failed')
+  assert.equal(cardsConnected, false)
+  const delivery = await runtime.replySink.reply(
+    {
+      schemaVersion: 1,
+      eventId: 'fixture-late-event',
+      messageId: 'fixture-late-inbound',
+      conversationId: 'allowed-group',
+      conversationType: 'group',
+      senderOpenDingTalkId: 'allowed-open-id',
+      senderName: '夹具成员',
+      text: '夹具请求',
+      createdAt: '1',
+    },
+    'fixture-session',
+    '夹具迟到回复',
+  )
+  assert.equal(delivery.deliveryStatus, 'delivered')
+  assert.equal(runtime.currentStatus().state, 'failed')
+  assert.equal(cardsConnected, false)
+})
+
 async function createFakeDws(root, pathCommand = false) {
   const source = `#!/usr/bin/env node
 const fs = require('node:fs')
@@ -82,7 +182,14 @@ if (args.includes('--help')) {
   process.stdout.write(process.env.FAKE_DWS_A2UI === '1' ? '--summary --content --a2ui-annotations --open-dingtalk-id --conversation-id --biz-id --flow-status --flatten user_card_action_triggered' : '{}')
   process.exit(0)
 }
-const operation = args.includes('capabilities') ? 'capabilities' : args.includes('reply') ? 'reply' : args.includes('operator-private') ? 'operator-private' : args.includes('consume') ? 'consume' : 'unknown'
+if (args.includes('--local-lease')) {
+  process.stderr.write('[employee] leased\\n')
+  process.stdin.resume()
+  process.stdin.on('end', () => process.exit(0))
+  process.on('SIGTERM', () => process.exit(0))
+  return
+}
+const operation = args.includes('binding') ? 'binding' : args.includes('capabilities') ? 'capabilities' : args.includes('reply') ? 'reply' : args.includes('operator-private') ? 'operator-private' : args.includes('consume') ? 'consume' : 'unknown'
 fs.appendFileSync(record, JSON.stringify({ operation, args, credentialEnvKeys: Object.keys(process.env).filter((key) => /TOKEN|AUTH_?CODE|CLIENT_?SECRET|PASSWORD|CREDENTIAL/i.test(key)) }) + '\\n')
 if (args.includes('send-a2ui-card') || args.includes('update-a2ui-card')) {
   process.stdout.write(JSON.stringify({ ok: true, data: { bizId: 'host-card' } }))
@@ -133,6 +240,10 @@ if (operation === 'consume') {
   process.stdin.on('data', (chunk) => { input += chunk })
   process.stdin.on('end', () => {
     const value = input ? JSON.parse(input) : {}
+    if (operation === 'binding') {
+      process.stdout.write(JSON.stringify({ ok: true, outcome: 'success', data: { agentUuid: value.agentUuid, dwsProfile: args[args.indexOf('--profile') + 1], bindingRevision: value.bindingRevision, channel: 'dsh', bindingState: 'bound', desiredState: 'running' } }))
+      return
+    }
     const openMessageId = process.env.FAKE_DWS_EMPTY_RECEIPT === '1' ? '' : operation === 'reply' ? 'outgoing-1' : 'operator-message-1'
     process.stdout.write(JSON.stringify({ ok: true, outcome: 'success', data: { openMessageId, conversationId: value.conversationId || 'operator-conversation', deliveryStatus: 'delivered', idempotencyKey: value.idempotencyKey }, meta: {} }))
   })
@@ -233,6 +344,7 @@ if (args.includes('consume')) {
 }
 
 function createHost(interact) {
+  const lifecycle = new Context()
   const handlers = new Map()
   const agents = new Map()
   const followups = []
@@ -241,6 +353,7 @@ function createHost(interact) {
     return Promise.all((handlers.get(name) ?? []).map((handler) => handler(...args)))
   }
   const ctx = {
+    effect: (...args) => lifecycle.effect(...args),
     credentials: { resolve: async () => undefined },
     agentDefaultModel: { currentSelection: () => ({ provider: 'test', model: 'model' }) },
     agents: {
@@ -298,7 +411,7 @@ function createHost(interact) {
       return () => list.splice(list.indexOf(handler), 1)
     },
   }
-  return { ctx, followups, sessions, dispose: () => emit('dispose') }
+  return { ctx, followups, sessions, dispose: () => lifecycle.fiber.dispose() }
 }
 
 function pluginConfig(workspace, digitalEmployees) {
@@ -332,7 +445,7 @@ function pluginConfig(workspace, digitalEmployees) {
 }
 
 test(
-  '默认 apply 完整接线：不用环境开关，从消息到原生 ask、发卡、订阅回调恢复请求',
+  '默认 apply 接线并随员工停止释放：原生 ask 回调恢复，未决定的审批取消',
   { skip: process.platform === 'win32' },
   async (t) => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-default-a2ui-'))
@@ -393,6 +506,29 @@ test(
     const records = (await readFile(recordFile, 'utf8')).trim().split('\n').map(JSON.parse)
     assert.ok(records.find((r) => r.operation === 'consume').args.includes('user_card_action_triggered'))
     assert.equal(records.filter((r) => r.args.includes('send-a2ui-card')).length, 1)
+    const session = host.sessions[0]
+    const agent = host.ctx.agents.get(session.sessionId)
+    const approval = session.scoped.get('approval/request')({ agent, toolName: 'fixture_pending_tool' }, () =>
+      assert.fail('不得另开授权通道'),
+    )
+    await waitFor(async () => {
+      const calls = (await readFile(recordFile, 'utf8')).trim().split('\n').map(JSON.parse)
+      // 等发卡结果已确认并进入等待态，再验证停止会重绘已送达的卡片。
+      return (
+        calls.filter((call) => call.args.includes('send-a2ui-card')).length === 2 &&
+        calls.filter((call) => call.args.includes('update-a2ui-card') && call.args.includes('CONFIRMING')).length === 2
+      )
+    })
+    await host.dispose()
+    assert.equal(await approval, 'cancelled')
+    const stoppedCalls = (await readFile(recordFile, 'utf8')).trim().split('\n').map(JSON.parse)
+    assert.ok(stoppedCalls.some((call) => call.args.includes('update-a2ui-card') && call.args.includes('ABORTED')))
+    const status = JSON.parse(
+      await readFile(path.join(root, 'state', 'digital-employees', employee.agentUuid, 'runtime.json'), 'utf8'),
+    )
+    assert.equal(status.state, 'stopped')
+    assert.equal(session.scoped.has('approval/request'), false)
+    assert.equal(session.scoped.has('user-questions/request'), false)
   },
 )
 
@@ -743,7 +879,7 @@ test(
     process.env.DSH_DINGTALK_STATE_DIR = stateDir
     const hosts = []
     t.after(async () => {
-      for (const host of hosts) host.dispose()
+      for (const host of hosts) await host.dispose()
       await new Promise((resolve) => setTimeout(resolve, 20))
       if (originalPath === undefined) delete process.env.PATH
       else process.env.PATH = originalPath
@@ -775,7 +911,7 @@ test(
     assert.equal(new Set(first.followups.map((item) => item.sessionId)).size, 2)
     assert.ok(first.followups.every((item) => item.message.content[0].text === '只应通过 stdin 回复的正文'))
 
-    first.dispose()
+    await first.dispose()
     await new Promise((resolve) => setTimeout(resolve, 50))
     const beforeRestart = (await readFile(recordFile, 'utf8'))
       .split('\n')

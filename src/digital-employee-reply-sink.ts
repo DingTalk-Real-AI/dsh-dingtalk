@@ -48,7 +48,7 @@ interface DwsDigitalEmployeeReplySinkOptions {
 export function sanitizedDwsEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const result = { ...env }
   for (const key of Object.keys(result)) {
-    if (/(TOKEN|AUTH_?CODE|SECRET|PASSWORD|CREDENTIAL)/i.test(key)) delete result[key]
+    if (/(TOKEN|AUTH_?CODE|SECRET|PASSWORD|CREDENTIAL)/i.test(key) || key === 'DWS_DUMP_RAW') delete result[key]
   }
   return result
 }
@@ -59,6 +59,7 @@ function idempotencyKey(employee: DigitalEmployeeConfig, event: DigitalEmployeeE
 
 /** DWS 的安全 stdin 回复、operator 私聊、审计与能力探测客户端。 */
 export class DwsDigitalEmployeeReplySink implements DigitalEmployeeControlSink {
+  private readonly activeCalls = new Set<Promise<unknown>>()
   private readonly pendingReplies = new Map<string, Set<Promise<unknown>>>()
 
   constructor(private readonly options: DwsDigitalEmployeeReplySinkOptions) {}
@@ -88,6 +89,9 @@ export class DwsDigitalEmployeeReplySink implements DigitalEmployeeControlSink {
         schemaVersion: 1,
         protocolVersion: 1,
         agentUuid: this.options.employee.agentUuid,
+        ...(this.options.employee.bindingRevision === undefined
+          ? {}
+          : { bindingRevision: this.options.employee.bindingRevision }),
         eventId: event.eventId,
         sessionId,
         conversationId: event.conversationId,
@@ -152,6 +156,9 @@ export class DwsDigitalEmployeeReplySink implements DigitalEmployeeControlSink {
           schemaVersion: 1,
           protocolVersion: 1,
           agentUuid: this.options.employee.agentUuid,
+          ...(this.options.employee.bindingRevision === undefined
+            ? {}
+            : { bindingRevision: this.options.employee.bindingRevision }),
           operatorOpenDingTalkId: this.options.employee.operatorOpenDingTalkId,
           text,
           idempotencyKey: key,
@@ -225,6 +232,34 @@ export class DwsDigitalEmployeeReplySink implements DigitalEmployeeControlSink {
     if (pending.length) await Promise.allSettled(pending)
   }
 
+  async verifyBinding(): Promise<void> {
+    const employee = this.options.employee
+    const result = (await this.execJson(
+      [
+        '--profile',
+        employee.dwsProfile,
+        'dingtalk-tag',
+        'channel',
+        'binding',
+        '--channel',
+        'dsh',
+        '--stdin',
+        '--format',
+        'json',
+      ],
+      { agentUuid: employee.agentUuid, bindingRevision: employee.bindingRevision ?? 0 },
+    )) as Record<string, unknown>
+    if (
+      result.agentUuid !== employee.agentUuid ||
+      result.dwsProfile !== employee.dwsProfile ||
+      result.channel !== 'dsh' ||
+      result.bindingRevision !== (employee.bindingRevision ?? 0) ||
+      result.bindingState !== 'bound' ||
+      result.desiredState !== 'running'
+    )
+      throw new Error('binding_not_authorized')
+  }
+
   private trackPendingReply(conversationId: string, delivery: Promise<unknown>): void {
     const pending = this.pendingReplies.get(conversationId) ?? new Set<Promise<unknown>>()
     pending.add(delivery)
@@ -238,7 +273,18 @@ export class DwsDigitalEmployeeReplySink implements DigitalEmployeeControlSink {
     if (!pending.size) this.pendingReplies.delete(conversationId)
   }
 
+  async drain(): Promise<void> {
+    while (this.activeCalls.size) await Promise.allSettled([...this.activeCalls])
+  }
+
   private execJson(args: string[], input?: unknown): Promise<unknown> {
+    const call = this.runJson(args, input)
+    this.activeCalls.add(call)
+    void call.finally(() => this.activeCalls.delete(call)).catch(() => undefined)
+    return call
+  }
+
+  private runJson(args: string[], input?: unknown): Promise<unknown> {
     const command = this.options.dwsCommand ?? 'dws'
     const commandArgs = [...(this.options.dwsArgsPrefix ?? []), ...args]
     return new Promise((resolve, reject) => {

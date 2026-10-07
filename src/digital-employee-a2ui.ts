@@ -4,7 +4,7 @@ import { A2uiInteractions, type A2uiCard, type A2uiMessage, type A2uiPresentatio
 import { sanitizedDwsEnvironment } from './digital-employee-reply-sink.js'
 import type { DigitalEmployeeConfig } from './setup-state.js'
 import type { DigitalEmployeeEvent } from './digital-employee-types.js'
-import type { HostAgentContext } from './host.js'
+import type { HostAgentContext, HostApprovalOutcome } from './host.js'
 import type { DigitalEmployeeAuditFields } from './digital-employee-audit.js'
 
 /** 数字员工默认接线：发卡前探测，未知投递结果不重试、不另开审批入口。 */
@@ -22,6 +22,12 @@ export function employeeA2ui(
   let connected = false
   const calls = new Set<Promise<unknown>>()
   let closed = false
+  const track = <T>(call: Promise<T>): Promise<T> => {
+    calls.add(call)
+    void call.finally(() => calls.delete(call)).catch(() => undefined)
+    return call
+  }
+  const audit = (fields: DigitalEmployeeAuditFields) => track(Promise.resolve().then(() => options.audit?.(fields)))
   const cli = (args: string[], signal: AbortSignal, help = false): Promise<unknown> => {
     const call = new Promise<unknown>((resolve, reject) => {
       if (signal.aborted) return reject(new Error('a2ui_aborted'))
@@ -64,9 +70,7 @@ export function employeeA2ui(
         }
       })
     })
-    calls.add(call)
-    void call.finally(() => calls.delete(call)).catch(() => undefined)
-    return call
+    return track(call)
   }
   const content = (messages: A2uiMessage[]) => JSON.stringify(messages.map((message) => JSON.stringify(message)))
   const annotations = (surfaceId: string, value: A2uiPresentation) =>
@@ -107,14 +111,12 @@ export function employeeA2ui(
         log(`a2ui state update accepted: ${value.state}`)
       })
     updates.set(card.bizId, call)
-    calls.add(call)
     void call
       .finally(() => {
         if (updates.get(card.bizId) === call) updates.delete(card.bizId)
-        calls.delete(call)
       })
       .catch(() => undefined)
-    return call
+    return track(call)
   }
   const manager = new A2uiInteractions({
     source,
@@ -261,21 +263,27 @@ export function employeeA2ui(
           const event = sessions.get(agent.id)
           if (!event) return 'unavailable'
           try {
-            await options.audit?.({
+            await audit({
               eventId: event.eventId,
               sessionId: agent.id,
               operationType: 'approval_request',
               toolName: request.toolName,
               status: 'started',
             })
-            const outcome = await manager.approve(request)
-            await options.audit?.({
-              eventId: event.eventId,
-              sessionId: agent.id,
-              operationType: 'approval_response',
-              toolName: request.toolName,
-              status: outcome,
+            const auditDecision = (outcome: HostApprovalOutcome) =>
+              audit({
+                eventId: event.eventId,
+                sessionId: agent.id,
+                operationType: 'approval_response',
+                toolName: request.toolName,
+                status: outcome,
+              })
+            let decisionAttempted = false
+            const outcome = await manager.approve(request, async (decision) => {
+              decisionAttempted = true
+              await auditDecision(decision)
             })
+            if (!decisionAttempted) await auditDecision(outcome)
             if (request.signal?.aborted || closed || JSON.stringify(employee) !== binding) return 'cancelled'
             return outcome
           } catch {
@@ -314,8 +322,12 @@ export function employeeA2ui(
       sessions.clear()
     },
     drain: async () => {
-      await new Promise<void>((resolve) => setImmediate(resolve))
-      await Promise.allSettled([...calls])
+      for (;;) {
+        // 审计完成可能继续触发终态更新，确认后续微任务也已登记再判断排空。
+        await new Promise<void>((resolve) => setImmediate(resolve))
+        if (!calls.size) return
+        await Promise.allSettled([...calls])
+      }
     },
   }
 }

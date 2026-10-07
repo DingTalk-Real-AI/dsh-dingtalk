@@ -266,3 +266,68 @@ test('审批审计失败即拒绝，不发送卡片、不回退', { skip: proces
   assert.equal(h.texts.length, 0)
   assert.equal(h.webCalls(), 0)
 })
+
+test('决定审计失败时卡片显示失效，宿主不放行也不另开授权通道', { skip: process.platform === 'win32' }, async (t) => {
+  const h = await harness(t, '', {
+    audit: async (fields) => {
+      if (fields.operationType === 'approval_response') throw new Error('fixture_decision_audit_unwritable')
+    },
+  })
+  assert.equal(await h.adapter.prepare(), true)
+  h.adapter.setConnected(true)
+  const approval = h.approve()
+  const card = await h.sent()
+  h.click(card, 'approve_once')
+  assert.equal(await approval, 'unavailable')
+  await h.adapter.drain()
+  const updates = (await h.calls()).filter((args) => args.includes('update-a2ui-card'))
+  assert.equal(
+    updates.some((args) => flag(args, '--flow-status') === 'CONFIRMED'),
+    false,
+  )
+  const terminal = updates.at(-1)
+  assert.equal(flag(terminal, '--flow-status'), 'ERROR')
+  const components = JSON.parse(flag(terminal, '--content'))
+    .map(JSON.parse)
+    .find((message) => message.updateComponents).updateComponents.components
+  assert.equal(components.find((component) => component.id === 'title').content, '## 请求已失效')
+  assert.equal(h.texts.length, 0)
+  assert.equal(h.webCalls(), 0)
+})
+
+test('关闭取消正在提交的审批，drain 等决定审计完成后才确认释放', { skip: process.platform === 'win32' }, async (t) => {
+  let releaseAudit, startedAudit
+  const auditStarted = new Promise((resolve) => {
+    startedAudit = resolve
+  })
+  const gate = new Promise((resolve) => {
+    releaseAudit = resolve
+  })
+  let auditCompleted = false
+  const h = await harness(t, '', {
+    audit: async (fields) => {
+      if (fields.operationType !== 'approval_response') return
+      startedAudit()
+      await gate
+      auditCompleted = true
+    },
+  })
+  t.after(() => releaseAudit())
+  assert.equal(await h.adapter.prepare(), true)
+  h.adapter.setConnected(true)
+  const approval = h.approve()
+  const card = await h.sent()
+  h.click(card, 'approve_once')
+  await auditStarted
+  h.adapter.close()
+  assert.equal(await approval, 'cancelled')
+  const draining = h.adapter.drain().then(() => auditCompleted)
+  const observed = await Promise.race([draining, new Promise((resolve) => setTimeout(() => resolve('waiting'), 300))])
+  releaseAudit()
+  assert.equal(observed, 'waiting')
+  assert.equal(await draining, true)
+  assert.equal(
+    (await h.calls()).some((args) => args.includes('CONFIRMED')),
+    false,
+  )
+})

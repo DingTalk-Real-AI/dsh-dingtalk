@@ -111,6 +111,7 @@ interface Pending {
   expiresAt: number
   kind: 'approval' | 'ask'
   questions: readonly HostUserQuestionItem[]
+  decideApproval(outcome: 'allowed-once' | 'rejected'): boolean
   finish(outcome: Terminal, answers?: HostUserQuestionAnswer, timedOut?: boolean): void
 }
 
@@ -144,6 +145,16 @@ function identity(route: A2uiRoute): string | undefined {
   )
     return `openDingTalkId:${route.operatorOpenDingTalkId}`
   return undefined
+}
+
+function sameRoute(current: A2uiRoute | undefined, snapshot: A2uiRoute): boolean {
+  return !!(
+    current &&
+    current.bindingId === snapshot.bindingId &&
+    identity(current) === identity(snapshot) &&
+    current.target.type === snapshot.target.type &&
+    current.target.id === snapshot.target.id
+  )
 }
 
 function actionContext(body: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
@@ -327,6 +338,9 @@ function questionReceipt(
       component: 'Markdown',
       content: `### ${questions.length > 1 ? `${index + 1}. ` : ''}${markdownText(question.question)}`,
     })
+    if (question.detail && question.detail.trim() !== question.question.trim()) {
+      components.push({ id: `${key}_detail`, component: 'Markdown', content: question.detail })
+    }
     if (outcome !== 'answered') continue
     const value = answer?.answers[index]
     if (value?.selected.length)
@@ -425,7 +439,11 @@ export class A2uiInteractions {
     return dispose
   }
 
-  async approve(request: HostApprovalRequest): Promise<HostApprovalOutcome> {
+  /** 接入方可提交决定审计；完成前保留等待态，失败时卡片与宿主都失效。 */
+  async approve(
+    request: HostApprovalRequest,
+    commitDecision?: (outcome: 'allowed-once' | 'rejected') => Promise<void>,
+  ): Promise<HostApprovalOutcome> {
     const { toolName, reason } = request
     const result = await this.start(
       request.agent.id,
@@ -433,6 +451,8 @@ export class A2uiInteractions {
       request.signal,
       (surface, id) => approvalCard(surface, id, toolName, reason),
       (surface, outcome) => readOnlyCard(surface, [...terminalHeader(outcome), ...approvalDetails(toolName, reason)]),
+      [],
+      commitDecision,
     )
     return result.outcome === 'answered' ? 'unavailable' : result.outcome
   }
@@ -468,6 +488,7 @@ export class A2uiInteractions {
     render: (surfaceId: string, id: string) => A2uiMessage[],
     renderTerminal: (surfaceId: string, outcome: Terminal, answers?: HostUserQuestionAnswer) => A2uiMessage[],
     questions: readonly HostUserQuestionItem[] = [],
+    commitDecision?: (outcome: 'allowed-once' | 'rejected') => Promise<void>,
   ): Promise<Result> {
     if (this.closed || signal?.aborted) return Promise.resolve({ outcome: 'cancelled' })
     let route: A2uiRoute | undefined
@@ -485,6 +506,7 @@ export class A2uiInteractions {
     return new Promise((resolve) => {
       const delivery = new AbortController()
       let finished: Terminal | undefined
+      let deciding = false
       let terminalPresentation: A2uiPresentation
       const waitingPresentation = presentation(
         kind === 'approval'
@@ -517,6 +539,26 @@ export class A2uiInteractions {
         questions,
         route: snapshot,
         expiresAt: Date.now() + timeoutMs,
+        decideApproval: (outcome) => {
+          if (finished || deciding) return false
+          deciding = true
+          if (!commitDecision) {
+            pending.finish(outcome)
+          } else {
+            void Promise.resolve()
+              .then(async () => {
+                if (finished) return
+                await commitDecision(outcome)
+                if (finished) return
+                // 等待审计时仍允许取消、超时和撤权，不能凭旧快照晚到批准。
+                if (Date.now() >= pending.expiresAt) pending.finish('unavailable', undefined, true)
+                else if (!sameRoute(this.options.route(sessionId, kind), snapshot)) pending.finish('unavailable')
+                else pending.finish(outcome)
+              })
+              .catch(() => pending.finish('unavailable'))
+          }
+          return true
+        },
         finish: (outcome, answers, timedOut) => {
           if (finished) return
           finished = outcome
@@ -590,17 +632,10 @@ export class A2uiInteractions {
     } catch {
       return false
     }
-    if (
-      !current ||
-      current.bindingId !== pending.route.bindingId ||
-      identity(current) !== identity(pending.route) ||
-      current.target.type !== pending.route.target.type ||
-      current.target.id !== pending.route.target.id
-    )
-      return false
+    if (!sameRoute(current, pending.route)) return false
     if (pending.kind === 'approval') {
       if (context.action !== 'approve_once' && context.action !== 'reject') return false
-      pending.finish(context.action === 'approve_once' ? 'allowed-once' : 'rejected')
+      return pending.decideApproval(context.action === 'approve_once' ? 'allowed-once' : 'rejected')
     } else if (context.action === 'cancel') {
       pending.finish('cancelled')
     } else if (context.action === 'submit') {
