@@ -32,7 +32,7 @@ export interface BridgeOptions {
   /** Default agent-preset composition (tools); empty when the deployment has no roster. */
   compose(): Promise<{ agentPreset?: string; setup?: AgentSetup }>
   /** Refresh transport context for tools that wait on channel input. */
-  onAgentMessage(agent: HostAgent, msg: InboundMessage): void | Promise<void>
+  onAgentMessage(agent: HostAgent, msg: InboundMessage, cwd: string): void | Promise<void>
   /** Resolve one inbound picture into a stored attachment block; null = degrade to text note. */
   resolveImage?(downloadCode: string, scopeKey: string): Promise<ImageBlock | null>
 }
@@ -65,8 +65,9 @@ export class Bridge {
   /** Drive one message through its agent; resolves when the turn settles. */
   async process(msg: InboundMessage, scopeKey: string): Promise<string> {
     if (this.closed) throw new Error('employee_stopping')
-    const agent = await this.agentFor(scopeKey)
-    await this.opts.onAgentMessage(agent, msg)
+    const cwd = this.opts.workspaceOverrides.get(scopeKey) ?? this.opts.cwd
+    const agent = await this.agentFor(scopeKey, cwd)
+    await this.opts.onAgentMessage(agent, msg, cwd)
     if (this.closed) throw new Error('employee_stopping')
     const settled = this.renderer.onInbound(agent.id, msg)
     const content: Array<TextBlock | ImageBlock> = []
@@ -96,12 +97,11 @@ export class Bridge {
     return agent.id
   }
 
-  private async agentFor(conversationId: string): Promise<HostAgent> {
+  private async agentFor(conversationId: string, cwd: string): Promise<HostAgent> {
     // Entry-point-created agents carry no session-local model selection, so the
     // route must be supplied here or prompt assembly fails ({{model}} unset).
     // Likewise the preset must be composed via setup, or the agent has no tools.
     const agentOptions = this.opts.modelOverrides.get(conversationId) ?? this.opts.modelSelection()
-    const cwd = this.opts.workspaceOverrides.get(conversationId) ?? this.opts.cwd
     const composition = await this.opts.compose()
     const bound = this.bindings.get(conversationId)
     if (bound) {

@@ -1,5 +1,6 @@
 /** Keep DingTalk sessions explicitly accounted by their DSH Web workspace. */
 import { realpath } from 'node:fs/promises'
+import path from 'node:path'
 import type { SessionId } from './host.js'
 
 export interface HostWorkspace {
@@ -33,19 +34,26 @@ export interface WorkspaceLinkerOptions {
 }
 
 export class WorkspaceLinker {
-  private ready: Promise<HostWorkspace | undefined> | undefined
+  private readonly ready = new Map<string, Promise<HostWorkspace | undefined>>()
 
   constructor(private readonly opts: WorkspaceLinkerOptions) {}
 
-  /** Resolve/create the workspace once and migrate matching persisted sessions. */
-  start(): Promise<HostWorkspace | undefined> {
-    this.ready ??= this.initialize()
-    return this.ready
+  /** 按目录解析/创建工作区，并迁移该目录的历史会话。失败不永久缓存。 */
+  start(cwd = this.opts.cwd): Promise<HostWorkspace | undefined> {
+    const key = path.resolve(cwd)
+    const existing = this.ready.get(key)
+    if (existing) return existing
+    const ready = this.initialize(key)
+    this.ready.set(key, ready)
+    void ready.then((workspace) => {
+      if (!workspace && this.ready.get(key) === ready) this.ready.delete(key)
+    })
+    return ready
   }
 
   /** Explicit membership is required; matching cwd alone does not group a session. */
-  async attach(sessionId: SessionId): Promise<void> {
-    const workspace = await this.start()
+  async attach(sessionId: SessionId, cwd = this.opts.cwd): Promise<void> {
+    const workspace = await this.start(cwd)
     if (!workspace) return
     const existed = workspace.sessionIds.includes(sessionId)
     try {
@@ -56,15 +64,15 @@ export class WorkspaceLinker {
     }
   }
 
-  private async initialize(): Promise<HostWorkspace | undefined> {
+  private async initialize(cwd: string): Promise<HostWorkspace | undefined> {
     const attempts = this.opts.attempts ?? 15
     const retryIntervalMs = this.opts.retryIntervalMs ?? 2_000
     for (let attempt = 0; attempt < attempts; attempt++) {
       try {
         const registry = this.opts.resolveRegistry()
         if (registry) {
-          const existing = await registry.resolveByPath(this.opts.cwd)
-          const workspace = existing ?? (await registry.create(this.opts.cwd))
+          const existing = await registry.resolveByPath(cwd)
+          const workspace = existing ?? (await registry.create(cwd))
           if (!existing) this.opts.log(`workspace registered in web UI: ${workspace.path}`)
           await this.migrate(workspace)
           return workspace
