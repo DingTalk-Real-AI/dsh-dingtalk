@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, readFile, writeFile, readdir, symlink, rm } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, writeFile, readdir, realpath, symlink, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
@@ -101,7 +101,7 @@ test('接收文件按账号/会话隔离，保留中文名称，同名不覆盖�
   )
   for (const stored of [first, second, otherChat, otherAccount]) {
     assert.equal(path.basename(stored.path), '报告.pdf')
-    assert.ok(stored.path.startsWith(dir + path.sep))
+    assert.ok(stored.path.startsWith((await realpath(dir)) + path.sep))
   }
   assert.notEqual(first.path, second.path)
   assert.notEqual(path.dirname(path.dirname(first.path)), path.dirname(path.dirname(otherChat.path)))
@@ -178,9 +178,16 @@ test('发送工具固定当前会话和工作区，拒绝跨 Agent、越界/符�
   await tools.get('send_file').execute({ path: '报告.pdf' }, exec)
   assert.equal(sent[1].target.conversationId, 'two')
   assert.equal(Buffer.from(sent[1].media.data).toString(), 'next')
+  const alias = path.join(dir, 'alias')
+  await symlink(nextCwd, alias, process.platform === 'win32' ? 'junction' : 'dir')
+  transfer.bindSession(agent, msg, alias)
+  await tools.get('send_file').execute({ path: path.join(alias, '报告.pdf') }, exec)
+  await tools.get('send_file').execute({ path: path.join(await realpath(nextCwd), '报告.pdf') }, exec)
+  assert.equal(Buffer.from(sent[2].media.data).toString(), 'next')
+  assert.equal(Buffer.from(sent[3].media.data).toString(), 'next')
   const aborted = AbortSignal.abort()
   await assert.rejects(tools.get('send_file').execute({ path: '报告.pdf' }, { agent, signal: aborted }))
-  assert.equal(sent.length, 2)
+  assert.equal(sent.length, 4)
   transfer.close()
   await assert.rejects(tools.get('send_file').execute({ path: '报告.pdf' }, exec), /route_unavailable/)
 })

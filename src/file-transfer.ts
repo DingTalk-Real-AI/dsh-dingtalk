@@ -160,8 +160,10 @@ export class FileTransfer {
     const signal = AbortSignal.any([exec.signal, this.abort.signal])
     signal.throwIfAborted()
     const root = await realpath(route.cwd)
-    const requested = path.resolve(root, args.path)
-    if (!inside(root, requested)) throw new Error('file_outside_workspace')
+    // macOS 的 /var 与 /private/var 可指向同一工作区；同时接受所选路径和规范路径。
+    const selectedRoot = path.resolve(route.cwd)
+    const requested = path.resolve(selectedRoot, args.path)
+    if (!inside(selectedRoot, requested) && !inside(root, requested)) throw new Error('file_outside_workspace')
     const actual = await realpath(requested)
     if (!inside(root, actual)) throw new Error('file_outside_workspace')
     if (!(await lstat(actual)).isFile()) throw new Error('file_not_regular')

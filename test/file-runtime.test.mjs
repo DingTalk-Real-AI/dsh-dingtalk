@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, realpath, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test, { mock } from 'node:test'
@@ -149,7 +149,7 @@ test(
     const text = messages[0].message.content[0].text
     const ref = JSON.parse(text.split('\n')[1])
     assert.equal(ref.fileName, '报告.pdf')
-    assert.ok(ref.path.startsWith(next + path.sep))
+    assert.ok(ref.path.startsWith((await realpath(next)) + path.sep))
     assert.equal(await readFile(ref.path, 'utf8'), 'fixture PDF')
     assert.doesNotMatch(text, /fixture-code|fixture-token/)
     const agent = messages[0].agent
