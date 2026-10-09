@@ -25,6 +25,44 @@ function inbound(text) {
   }
 }
 
+test('文件排队选择并入时保留附件任务，不发送空 steering 或跳过下载', async () => {
+  const replies = []
+  let skipped = false,
+    steered = false
+  const commands = new Commands({
+    agents: {
+      get: () => ({
+        status: 'running',
+        steer() {
+          steered = true
+        },
+      }),
+    },
+    outbound: {
+      async sendMarkdown(_msg, _title, text) {
+        replies.push(text)
+        return true
+      },
+    },
+    bindings: store({ c1: 'session' }),
+    modelOverrides: store(),
+    queue: { depth: () => 1 },
+    markdownTitle: 'DSH',
+    log() {},
+  })
+  commands.markBusyNotice('c1', {
+    queuedMsg: { ...inbound(''), contentParts: [{ type: 'file', downloadCode: 'fixture', fileName: 'file.pdf' }] },
+    skip() {
+      skipped = true
+    },
+    started: () => false,
+  })
+  assert.equal(await commands.handle(inbound('2')), true)
+  assert.equal(skipped, false)
+  assert.equal(steered, false)
+  assert.match(replies.at(-1), /已保留排队/)
+})
+
 test('/new 取消运行中的旧 Agent 后解除会话绑定', async () => {
   const sent = []
   const bindings = store({ c1: 'session-1' })

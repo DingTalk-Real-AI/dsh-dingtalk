@@ -8,6 +8,7 @@ import { QuestionManager } from '../lib/questions.js'
 import { A2uiInteractions } from '../lib/a2ui.js'
 import { DigitalEmployeeApprovalManager } from '../lib/digital-employee-renderer.js'
 import { employeeA2ui } from '../lib/digital-employee-a2ui.js'
+import { FileTransfer } from '../lib/file-transfer.js'
 
 // 先在独立目录安装 @deepseek-ai/dsh@0.2.0-rc.2，再传入该目录的 node_modules。
 const modules = process.env.DSH_SMOKE_NODE_MODULES
@@ -91,6 +92,15 @@ try {
     () => {},
   )
   let setups = 0
+  const files = new FileTransfer({
+    accountId: 'fixture',
+    outbound: {
+      async sendMedia() {
+        throw new Error('unexpected DingTalk media')
+      },
+    },
+    log() {},
+  })
   const contexts = []
   const setup = (ctx, agent) => {
     setups++
@@ -100,6 +110,8 @@ try {
     assert.throws(() => ctx.agent, /cannot get property "agent" without inject/)
     questions.install(ctx, agent)
     questions.installFor(agent)
+    files.install(ctx, agent)
+    files.install(ctx, agent)
     cards.install(ctx, agent)
     text.install(ctx, agent)
     employee.install(ctx, agent)
@@ -144,6 +156,8 @@ try {
   const loaded = await root.agents.create({ sessionId: 'fixture-loaded', meta: { cwd: dir } })
   questions.installFor(loaded.agent)
   questions.installFor(loaded.agent)
+  files.install(loaded.agent.ctx, loaded.agent)
+  files.install(loaded.agent.ctx, loaded.agent)
   cards.install(loaded.agent.ctx, loaded.agent)
   text.install(loaded.agent.ctx, loaded.agent)
   employee.install(loaded.agent.ctx, loaded.agent)
@@ -152,6 +166,7 @@ try {
   cards.close()
   text.close()
   employee.close()
+  await files.close()
   console.log('PASS DSH 0.2.0-rc.2：创建、恢复、补装、重复安装、setup 回滚后重试；无钉钉消息和模型调用')
 } finally {
   globalThis.fetch = originalFetch

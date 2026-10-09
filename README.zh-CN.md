@@ -6,6 +6,21 @@
 
 需要 Node.js `^22.19.0 || >=24.0.0`。机器人只在本机 `dsh web` 运行且网络在线时工作；电脑休眠、断网或进程退出后不会在云端继续执行。
 
+## 文件接收与回传
+
+在机器人单聊中直接发送文件，连接器会将不超过 20 MB 的附件保存到当前会话工作区的 `.dsh-dingtalk/inbox/` 下，按机器人、会话和每次接收分别建目录，同名文件不会覆盖。使用 `/cd` 切换工作区后，新收到的文件保存在目标工作区。模型收到文件名称、大小和本地路径，再使用 DSH 的文件工具读取；这不意味着模型原生支持所有文件格式，PDF、Office 或压缩包仍需要合适的解析工具。
+
+例如，先发送 PDF，再说“请分析这份文件，把结果整理成 Word 发给我”。机器人会话中的模型可以使用 `send_file` 或 `send_image` 将工作区内的文件回传原会话，无需 DWS 登录或工作通知 AgentId。工具不接受自定义收件人，也不允许读取工作区外路径。文件只能排队独立处理或选择打断前一任务；选择“并入”时会保留文件排队，避免附件丢失。
+
+- **回传文件**：支持 `xlsx`、`pdf`、`zip`、`rar`、`doc`、`docx`，最大 20 MB。其他类型可先整理成受支持的文件或压缩为 ZIP。
+- **回传图片**：支持 `jpg`、`jpeg`、`png`、`gif`、`bmp`，最大 20 MB。
+- **权限**：使用当前机器人的应用凭据，需要“企业内机器人发送消息权限”；发送失败时检查应用权限和机器人可用范围。
+- **范围**：支持机器人单聊收文件，以及原单聊/群聊回传。钉钉官方当前不支持群内 @ 机器人接收文件、语音、视频；本期也不提供语音/视频落盘、转写或数字员工文件通道。
+- **发送状态**：工具返回 `accepted` 只表示钉钉接口接受请求，不能作为客户端送达或已读证明。上传失败或发送结果未知时不会自动重试。
+- **本地文件**：接收内容不会自动解压或执行，也不会自动清理；不再需要时可自行删除 inbox 内的附件目录。
+
+接口与格式限制见钉钉官方文档：[接收文件下载](https://open.dingtalk.com/document/orgapp/download-the-file-content-of-the-robot-receiving-message.md)、[机器人消息类型](https://open.dingtalk.com/document/orgapp/types-of-messages-sent-by-robots.md)、[上传媒体文件](https://open.dingtalk.com/document/orgapp/upload-media-files.md)。
+
 ## 数字员工 Channel（文本 MVP）
 
 数字员工是与机器人平级的新 Channel：机器人仍可在不安装 DWS 的环境中工作；只有启用数字员工时才要求兼容 DWS companion runtime。DWS 负责 connect、授权码交换和 Profile 凭据，DSH 负责本地白名单、事件进程、Session、Queue、Agent、文本回复和诊断，DSH 不保存 Token、AuthCode 或 Client Secret。

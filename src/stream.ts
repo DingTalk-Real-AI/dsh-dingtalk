@@ -11,7 +11,9 @@ import { dirname } from 'node:path'
 import type { DingTalkAppCredentials } from './credentials.js'
 
 export type InboundContentPart =
-  { readonly type: 'text'; readonly text: string } | { readonly type: 'image'; readonly downloadCode: string }
+  | { readonly type: 'text'; readonly text: string }
+  | { readonly type: 'image'; readonly downloadCode: string }
+  | { readonly type: 'file'; readonly downloadCode: string; readonly fileName: string }
 
 /** One normalized inbound robot message. */
 export interface InboundMessage {
@@ -366,7 +368,19 @@ export async function startStream(opts: StreamOptions): Promise<() => void> {
         data?.msgtype === 'picture' && imageDownloadCodes[0]
           ? [{ type: 'image', downloadCode: imageDownloadCodes[0] }]
           : richTextParts
-      if (!text && imageDownloadCodes.length === 0) {
+      if (
+        data?.msgtype === 'file' &&
+        conversationType === 'direct' &&
+        typeof contentObj?.downloadCode === 'string' &&
+        contentObj.downloadCode.trim()
+      ) {
+        contentParts.push({
+          type: 'file',
+          downloadCode: contentObj.downloadCode,
+          fileName: typeof contentObj.fileName === 'string' ? contentObj.fileName : 'attachment',
+        })
+      }
+      if (!text && contentParts.length === 0) {
         opts.log(`unsupported inbound shape=${describeInboundShape(data, rawContent, contentObj)}`)
         if (data?.sessionWebhook) opts.onUnsupported?.(String(data?.msgtype ?? 'unknown'), data.sessionWebhook)
         return

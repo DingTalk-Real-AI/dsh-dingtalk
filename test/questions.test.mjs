@@ -72,6 +72,23 @@ async function waitUntil(predicate, timeoutMs = 200) {
   }
 }
 
+test('问答等待期间的文件消息进入队列，不被当作空白答案消费', async () => {
+  const h = harness()
+  const pending = execute(h, [{ id: 'detail', question: '请补充说明' }])
+  await Promise.resolve()
+  assert.equal(
+    h.manager.handleInbound(
+      inbound({
+        text: '',
+        contentParts: [{ type: 'file', downloadCode: 'fixture', fileName: 'file.pdf' }],
+      }),
+    ),
+    false,
+  )
+  assert.equal(h.manager.handleInbound(inbound({ text: '先处理当前任务' })), true)
+  assert.deepEqual(await pending, { answers: [{ id: 'detail', selected: [], custom: '先处理当前任务' }] })
+})
+
 test('单选序号由同一会话、同一发件人的下一条消息回答', async () => {
   const h = harness()
   const resultPromise = execute(h, [

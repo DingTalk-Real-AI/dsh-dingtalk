@@ -279,6 +279,8 @@ export class QuestionManager {
 
   /** Consume a matching human answer before commands and the serial task queue. */
   handleInbound(msg: InboundMessage): boolean {
+    // 文件要进入下载/队列链路，不能被当成空白问答或审批回复吞掉。
+    if (msg.contentParts?.some((part) => part.type === 'file')) return false
     const key = routeKey(msg)
     const approval = this.pendingApprovalByRoute.get(key)
     if (approval) {
