@@ -7,7 +7,7 @@
 import { randomUUID } from 'node:crypto'
 import type { AgentHandle, HostAgent, AgentSetup, HostAgentRegistry, ImageBlock, TextBlock } from './host.js'
 import { sessionId } from './host.js'
-import type { InboundMessage } from './stream.js'
+import type { InboundContentPart, InboundMessage } from './stream.js'
 import type { JsonStore } from './jsonstore.js'
 import type { ModelOverride } from './commands.js'
 
@@ -35,6 +35,8 @@ export interface BridgeOptions {
   onAgentMessage(agent: HostAgent, msg: InboundMessage, cwd: string): void | Promise<void>
   /** Resolve one inbound picture into a stored attachment block; null = degrade to text note. */
   resolveImage?(downloadCode: string, scopeKey: string): Promise<ImageBlock | null>
+  /** 文件落盘到当前会话 cwd 后，以明确的文本引用交给宿主。 */
+  resolveFile?(file: Extract<InboundContentPart, { type: 'file' }>, scopeKey: string, cwd: string): Promise<TextBlock>
 }
 
 export class Bridge {
@@ -80,6 +82,12 @@ export class Bridge {
     for (const part of parts) {
       if (part.type === 'text') {
         content.push({ type: 'text', text: part.text })
+      } else if (part.type === 'file') {
+        content.push(
+          this.opts.resolveFile
+            ? await this.opts.resolveFile(part, scopeKey, cwd)
+            : { type: 'text', text: '（文件接收不可用，文件尚未保存）' },
+        )
       } else if (this.opts.resolveImage) {
         const image = await this.opts.resolveImage(part.downloadCode, scopeKey)
         if (image) content.push(image)

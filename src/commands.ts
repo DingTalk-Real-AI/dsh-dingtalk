@@ -316,6 +316,10 @@ export class Commands {
     reply: (t: string) => Promise<void>,
     scopeKey?: string,
   ): Promise<void> {
+    if (ctx.queuedMsg.contentParts?.some((part) => part.type === 'file')) {
+      await reply('📎 文件消息需要下载后处理，已保留排队；可用 `/stop` 打断当前任务，让文件尽快开始处理。')
+      return
+    }
     const bound = this.deps.bindings.get(scopeKey ?? msg.conversationId)
     const agent = bound ? this.deps.agents.get(sessionId(bound)) : undefined
     if (agent && agent.status === 'running') {

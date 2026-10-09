@@ -1,5 +1,7 @@
 # DSH DingTalk
 
+文件接收与回传：支持机器人单聊接收不超过 20 MB 的附件，并通过会话专属 `send_file` / `send_image` 工具将工作区内的文件或图片回传原单聊或群聊。文件格式、权限、平台限制和使用方式见[中文文件指南](README.zh-CN.md#文件接收与回传)。
+
 [简体中文](README.zh-CN.md) | English
 
 Connect local [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) to DingTalk over a Stream connection, without a public inbound endpoint.

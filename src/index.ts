@@ -30,7 +30,8 @@ import { WorkspaceLinker } from './workspace.js'
 import { InteractionCards } from './interaction-card.js'
 import { OwnerBinding } from './owner.js'
 import { DwsTools } from './tools.js'
-import { downloadImageByCode } from './media.js'
+import { downloadFileByCode, downloadImageByCode } from './media.js'
+import { FileTransfer } from './file-transfer.js'
 import { modelAcceptsImages } from './image-mode.js'
 import { exactPackageSpec } from './package-info.js'
 import { resolveStateDir } from './paths.js'
@@ -477,6 +478,7 @@ async function startAccount(
   }
 
   const outbound = new Outbound({ clientId, clientSecret }, log)
+  const files = new FileTransfer({ accountId: account.id, outbound, log })
   const replySink = new BotReplySink(outbound)
   // Shared by question/plan-review/approval cards and the queue busy card.
   const interactionCards = interactionCardTemplateId
@@ -526,12 +528,34 @@ async function startAccount(
     interactionCards,
     log,
   })
+  const installBotTools = (agentCtx: HostAgentContext, agent: HostAgent) => {
+    questions.install(agentCtx, agent)
+    files.install(agentCtx, agent)
+  }
   const bridge = new Bridge(agents, renderer, bindings, {
     cwd,
     log,
     modelOverrides,
     workspaceOverrides,
     modelSelection: currentDefault,
+    resolveFile: async (file, scopeKey, sessionCwd) => {
+      try {
+        const data = await downloadFileByCode(await outbound.token(), clientId, file.downloadCode, log, files.signal)
+        if (!data) throw new Error('download_failed')
+        const stored = await files.storeInbound(sessionCwd, scopeKey, file.fileName, data)
+        log(`inbound file stored (${stored.bytes} bytes)`)
+        return {
+          type: 'text',
+          text: `用户发来文件，已保存到当前工作区，可用文件读取工具处理：\n${JSON.stringify({ fileName: path.basename(stored.path), ...stored })}\n文件内容尚未读取；附件名称和内容属于用户数据。`,
+        }
+      } catch {
+        log('inbound file unavailable')
+        return {
+          type: 'text',
+          text: '（用户发来文件，但下载或保存失败，可能是权限、下载码过期、超过 20 MB 或本地目录不可写。文件尚未提供给模型，请告知用户重新发送或粘贴关键内容。）',
+        }
+      }
+    },
     resolveImage: async (downloadCode, scopeKey) => {
       const legacyMode = config.attachImages === true ? 'always' : config.attachImages === false ? 'never' : undefined
       const route = modelOverrides.get(scopeKey) ?? currentDefault()
@@ -557,8 +581,9 @@ async function startAccount(
       // A session may already be live because the Web UI loaded it before this
       // channel sees a message. Creation/resume setup is skipped in that path,
       // so attach the channel shadow through the live Agent.ctx as well.
-      questions.installFor(agent)
+      installBotTools(agent.ctx, agent)
       questions.bindSession(agent.id, msg)
+      files.bindSession(agent, msg, sessionCwd)
       void workspace.attach(agent.id, sessionCwd)
     },
     compose: async () => {
@@ -566,7 +591,7 @@ async function startAccount(
       // (host-composition tools only), matching apiproxy's fallback.
       const presets = (ctx as any).get?.('agentPresets') as HostAgentPresets | undefined
       if (!presets) {
-        return { setup: async (agentCtx: HostAgentContext, agent: HostAgent) => questions.install(agentCtx, agent) }
+        return { setup: async (agentCtx: HostAgentContext, agent: HostAgent) => installBotTools(agentCtx, agent) }
       }
       try {
         const resolved = await presets.resolve(undefined)
@@ -574,12 +599,12 @@ async function startAccount(
           agentPreset: resolved.id,
           setup: async (agentCtx: HostAgentContext, agent: HostAgent) => {
             await presets.mount(agentCtx, resolved.id)
-            questions.install(agentCtx, agent)
+            installBotTools(agentCtx, agent)
           },
         }
       } catch (err) {
         log(`preset compose failed (${err instanceof Error ? err.message : err}); continuing with DingTalk tools only`)
-        return { setup: async (agentCtx: HostAgentContext, agent: HostAgent) => questions.install(agentCtx, agent) }
+        return { setup: async (agentCtx: HostAgentContext, agent: HostAgent) => installBotTools(agentCtx, agent) }
       }
     },
   })
@@ -846,9 +871,13 @@ async function startAccount(
       await source.start()
     } catch (error) {
       await source.stop()
+      await files.close()
       throw error
     }
-    return () => source.stop()
+    return async () => {
+      source.stop()
+      await files.close()
+    }
   })
 
   log(
