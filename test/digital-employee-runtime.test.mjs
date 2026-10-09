@@ -4,6 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
+import { strictAgentContext } from './helpers/strict-agent-context.mjs'
 
 import { authorizeDigitalEmployeeEvent, DwsDigitalEmployeeSource } from '../lib/digital-employee-runtime.js'
 import { apply } from '../lib/index.js'
@@ -484,14 +485,17 @@ function createHost(interact) {
         throw new Error('restart test deliberately has no live agent')
       },
       create: async (options) => {
+        const scope = strictAgentContext()
+        lifecycle.effect(() => scope.dispose)
+        const agentCtx = scope.ctx
         const scoped = new Map()
-        const agentCtx = {
-          agent: undefined,
-          tools: { register: () => () => {} },
-          on(name, handler) {
-            scoped.set(name, handler)
-            return () => scoped.delete(name)
-          },
+        agentCtx.on = (name, handler, options) => {
+          const off = scope.root.on(name, handler, options)
+          scoped.set(name, handler)
+          return () => {
+            off()
+            scoped.delete(name)
+          }
         }
         const agent = {
           id: options.sessionId,
@@ -512,8 +516,7 @@ function createHost(interact) {
           steer() {},
           cancel() {},
         }
-        agentCtx.agent = agent
-        await options.setup?.(agentCtx)
+        await options.setup?.(agentCtx, agent)
         agents.set(options.sessionId, agent)
         sessions.push({ sessionId: options.sessionId, scoped })
         return { agent, dispose: async () => {} }

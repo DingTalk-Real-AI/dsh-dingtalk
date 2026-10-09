@@ -5,6 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test, { mock } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
+import { strictAgentContext } from './helpers/strict-agent-context.mjs'
 
 function deferred() {
   let resolve
@@ -86,11 +87,9 @@ test('图片接收在 Auto 模式下覆盖拒绝提示与下载、存储、注�
   mock.method(console, 'log', (...args) => runtimeLogs.push(args.join(' ')))
   let sessionEvent
   const workspace = { path: root, sessionIds: [], async attachSession() {} }
-  const agentContext = {
-    agent: undefined,
-    tools: { register() {} },
-    on() {},
-  }
+  const scope = strictAgentContext()
+  t.after(scope.dispose)
+  const agentContext = scope.ctx
   const agent = {
     id: '',
     status: 'idle',
@@ -112,8 +111,7 @@ test('图片接收在 Auto 模式下覆盖拒绝提示与下载、存储、注�
       },
       create: async (options) => {
         agent.id = options.sessionId
-        agentContext.agent = agent
-        await options.setup?.(agentContext)
+        await options.setup?.(agentContext, agent)
         return { agent }
       },
     },

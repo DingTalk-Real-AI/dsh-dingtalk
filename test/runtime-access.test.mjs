@@ -5,6 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
+import { strictAgentContext } from './helpers/strict-agent-context.mjs'
 
 import { DWClient, TOPIC_ROBOT } from 'dingtalk-stream'
 import { apply } from '../lib/index.js'
@@ -63,14 +64,18 @@ function createHost(workspace) {
     },
     create: async (options) => {
       const scopedHandlers = new Map()
-      const agentCtx = {
-        agent: undefined,
-        tools: { register: () => () => {} },
+      const scope = strictAgentContext()
+      lifecycle.effect(() => scope.dispose)
+      const agentCtx = scope.ctx.extend({
         on(name, handler) {
+          const off = scope.ctx.on(name, handler)
           scopedHandlers.set(name, handler)
-          return () => scopedHandlers.delete(name)
+          return () => {
+            off()
+            scopedHandlers.delete(name)
+          }
         },
-      }
+      })
       const agent = {
         id: options.sessionId,
         status: 'idle',
@@ -92,8 +97,7 @@ function createHost(workspace) {
         steer() {},
         cancel() {},
       }
-      agentCtx.agent = agent
-      await options.setup?.(agentCtx)
+      await options.setup?.(agentCtx, agent)
       agents.set(options.sessionId, agent)
       created.push({ sessionId: options.sessionId, cwd: options.meta?.cwd, agent, scopedHandlers })
       return { agent, dispose: async () => {} }

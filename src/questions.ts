@@ -225,7 +225,7 @@ export class QuestionManager {
   private readonly pendingApprovalBySession = new Map<SessionId, PendingApproval>()
   private readonly pendingApprovalByCard = new Map<string, PendingApproval>()
   private readonly pendingApprovalByRoute = new Map<string, PendingApproval>()
-  private readonly installedAgents = new WeakSet<HostAgent>()
+  private readonly installedContexts = new WeakSet<HostAgentContext>()
 
   constructor(private readonly opts: QuestionManagerOptions) {}
 
@@ -240,33 +240,41 @@ export class QuestionManager {
   }
 
   /** Register the DingTalk-specific shadow in one agent's scoped context. */
-  install(agentCtx: HostAgentContext): void {
-    const agent = agentCtx.agent
-    if (agent && this.installedAgents.has(agent)) return
-    agentCtx.tools.register(this.definition())
-    if (agent) {
-      this.installedAgents.add(agent)
-      agentCtx.on('user-questions/request', (request, next) => {
-        if (request.agent !== undefined && request.agent !== agent) return next()
-        if (!this.routes.has(agent.id)) return next()
-        return this.askNative(agent, request)
-      })
-      agentCtx.on(
-        'approval/request',
-        (request, next) => {
-          if (request.agent !== agent) return next()
+  install(agentCtx: HostAgentContext, agent: HostAgent): void {
+    if (this.installedContexts.has(agentCtx)) return
+    const disposers: Array<() => void> = []
+    try {
+      disposers.push(agentCtx.tools.register(this.definition()))
+      disposers.push(
+        agentCtx.on('user-questions/request', (request, next) => {
+          if (request.agent !== undefined && request.agent !== agent) return next()
           if (!this.routes.has(agent.id)) return next()
-          return this.askApproval(agent, request)
-        },
-        { prepend: true },
+          return this.askNative(agent, request)
+        }),
       )
-      this.opts.log(`ask_user_question installed for session ${agent.id}`)
+      disposers.push(
+        agentCtx.on(
+          'approval/request',
+          (request, next) => {
+            if (request.agent !== agent) return next()
+            if (!this.routes.has(agent.id)) return next()
+            return this.askApproval(agent, request)
+          },
+          { prepend: true },
+        ),
+      )
+    } catch (error) {
+      for (const dispose of disposers.reverse()) dispose()
+      throw error
     }
+    // 仅成功安装的活跃作用域去重；恢复和 setup 回滚后产生的新 Context 可重新安装。
+    this.installedContexts.add(agentCtx)
+    this.opts.log(`ask_user_question installed for session ${agent.id}`)
   }
 
   /** Ensure an Agent loaded by another host surface also receives the shadow. */
   installFor(agent: HostAgent): void {
-    this.install(agent.ctx)
+    this.install(agent.ctx, agent)
   }
 
   /** Consume a matching human answer before commands and the serial task queue. */

@@ -5,7 +5,7 @@
  * serializes on that completion). Rendering lives in renderer.ts.
  */
 import { randomUUID } from 'node:crypto'
-import type { AgentHandle, HostAgent, HostAgentContext, HostAgentRegistry, ImageBlock, TextBlock } from './host.js'
+import type { AgentHandle, HostAgent, AgentSetup, HostAgentRegistry, ImageBlock, TextBlock } from './host.js'
 import { sessionId } from './host.js'
 import type { InboundMessage } from './stream.js'
 import type { JsonStore } from './jsonstore.js'
@@ -30,7 +30,7 @@ export interface BridgeOptions {
   /** Deployment default model route; undefined lets the host decide. */
   modelSelection(): { provider?: string; model?: string } | undefined
   /** Default agent-preset composition (tools); empty when the deployment has no roster. */
-  compose(): Promise<{ agentPreset?: string; setup?: (agentCtx: HostAgentContext) => Promise<void> }>
+  compose(): Promise<{ agentPreset?: string; setup?: AgentSetup }>
   /** Refresh transport context for tools that wait on channel input. */
   onAgentMessage(agent: HostAgent, msg: InboundMessage): void | Promise<void>
   /** Resolve one inbound picture into a stored attachment block; null = degrade to text note. */

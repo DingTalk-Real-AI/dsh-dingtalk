@@ -61,6 +61,9 @@ jobs:
           - dsh-version: 0.1.0-rc.7
             node-version: '22'
             job_name: Packed package with DSH 0.1.0-rc.7
+          - dsh-version: 0.2.0-rc.2
+            node-version: '24'
+            job_name: Agent setup with DSH 0.2.0-rc.2
           - dsh-version: latest
             node-version: '24'
             job_name: Packed package with latest DSH
@@ -77,6 +80,10 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Validate public artifact with latest NPM
         run: pnpm run test:pack
+      - name: Validate explicit Agent setup contract
+        if: matrix.dsh-version == '0.2.0-rc.2'
+        shell: bash
+        run: DSH_SMOKE_NODE_MODULES="$(npm root --global)" node scripts/smoke-agent-setup.mjs
       - name: Pack public artifact
         id: pack
         shell: bash

@@ -5,6 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test, { mock } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
+import { strictAgentContext } from './helpers/strict-agent-context.mjs'
 
 let deliveryClock = Date.now()
 
@@ -83,17 +84,12 @@ test('公开 apply 运行时允许管理员通过私聊或同群一次性文字�
   })
 
   const { apply } = await import(`../lib/index.js?approval-runtime=${Date.now()}`)
-  const listeners = new Map()
   let sessionEvent
   let followupCount = 0
   const workspace = { path: root, sessionIds: [], async attachSession() {} }
-  const agentContext = {
-    agent: undefined,
-    tools: { register() {} },
-    on(name, listener) {
-      listeners.set(name, listener)
-    },
-  }
+  const scope = strictAgentContext()
+  t.after(scope.dispose)
+  const agentContext = scope.ctx
   const agent = {
     id: '',
     status: 'idle',
@@ -116,8 +112,7 @@ test('公开 apply 运行时允许管理员通过私聊或同群一次性文字�
       },
       create: async (options) => {
         agent.id = options.sessionId
-        agentContext.agent = agent
-        await options.setup?.(agentContext)
+        await options.setup?.(agentContext, agent)
         return { agent }
       },
     },
@@ -170,8 +165,8 @@ test('公开 apply 运行时允许管理员通过私聊或同群一次性文字�
   await apply(ctx, config)
 
   await robotListener(delivery('start', '开始'))
-  await waitUntil(() => typeof listeners.get('approval/request') === 'function' && followupCount === 1)
-  const approve = listeners.get('approval/request')
+  await waitUntil(() => scope.listeners.has('approval/request') && followupCount === 1)
+  const approve = scope.listeners.get('approval/request')[0]
   t.mock.timers.enable({ apis: ['setTimeout'] })
   let fallbackCalls = 0
   const outcome = approve(

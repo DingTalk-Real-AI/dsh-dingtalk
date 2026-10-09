@@ -20,3 +20,23 @@ pnpm run ci
 - 维护者使用 squash merge，最终 PR 标题决定自动版本号。
 
 较大的行为或接口变化请先创建 Issue 对齐设计。
+
+## Agent setup 宿主回归
+
+严格 Cordis 回归通过真实的 `inject` 检查拒绝 `ctx.agent` 服务访问，并验证机器人、数字员工及旧 A2UI 输入类型：
+
+```bash
+corepack pnpm install --frozen-lockfile
+corepack pnpm run ci
+```
+
+公开 DSH `0.2.0-rc.2` 的宿主契约 smoke 使用隔离安装树，不读取现有 DSH 配置、不启动 Channel，也不调用模型：
+
+```bash
+smoke_dir=$(mktemp -d)
+npm install --prefix "$smoke_dir" --ignore-scripts --no-audit --no-fund @deepseek-ai/dsh@0.2.0-rc.2
+DSH_SMOKE_NODE_MODULES="$smoke_dir/node_modules" node scripts/smoke-agent-setup.mjs
+rm -rf "$smoke_dir"
+```
+
+运行 smoke 前需已构建连接器。它验证真实宿主的创建、持久化恢复、已加载补装、重复安装与 setup 失败回滚后重试；真实钉钉端到端验收需另行执行。

@@ -1,7 +1,9 @@
 import { randomUUID } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
+import { registerScoped } from './scoped-registration.js'
 import type {
   HostAgentContext,
+  HostAgent,
   HostApprovalOutcome,
   HostApprovalRequest,
   HostUserQuestionAnswer,
@@ -402,34 +404,39 @@ export class A2uiInteractions {
   }
 
   /** 仅在自己拥有的 Agent 上安装，不与旧审批管理器同时接管同一个 Agent。 */
-  install(ctx: HostAgentContext): () => void {
+  install(ctx: HostAgentContext & { readonly agent?: HostAgent }, explicitAgent?: HostAgent): () => void {
     if (this.closed) throw new Error('a2ui_closed')
     const existing = this.installations.get(ctx)
     if (existing) return existing
-    const agent = ctx.agent
+    // 只兼容旧适配器的自有属性，避免触发 Cordis 的缺失服务代理。
+    const ownAgent = explicitAgent === undefined ? Object.getOwnPropertyDescriptor(ctx, 'agent') : undefined
+    const agent = explicitAgent ?? ((ownAgent?.value ?? ownAgent?.get?.call(ctx)) as HostAgent | undefined)
     if (!agent) throw new Error('a2ui_requires_agent_scope')
-    const off = ctx.on(
-      'approval/request',
-      (request, next) => {
-        if (request.agent !== agent) return next()
-        return this.approve(request)
-      },
-      { prepend: true },
-    )
-    const questionOff = ctx.on(
-      'user-questions/request',
-      (request, next) => {
-        if (request.agent && request.agent !== agent) return next()
-        return this.ask(agent.id, request)
-      },
-      { prepend: true },
-    )
+    const disposeListeners = registerScoped([
+      () =>
+        ctx.on(
+          'approval/request',
+          (request, next) => {
+            if (request.agent !== agent) return next()
+            return this.approve(request)
+          },
+          { prepend: true },
+        ),
+      () =>
+        ctx.on(
+          'user-questions/request',
+          (request, next) => {
+            if (request.agent && request.agent !== agent) return next()
+            return this.ask(agent.id, request)
+          },
+          { prepend: true },
+        ),
+    ])
     let disposed = false
     const dispose = () => {
       if (disposed) return
       disposed = true
-      off()
-      questionOff()
+      disposeListeners()
       this.installations.delete(ctx)
       for (const request of this.pending.values()) {
         if (request.sessionId === agent.id) request.finish('cancelled')

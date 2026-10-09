@@ -47,7 +47,7 @@ root.provide('agents', {
     }
     agents.set(sessionId, agent)
     ownedHandles.push(handle)
-    await setup?.(agent.ctx)
+    await setup?.(agent.ctx, agent)
     return handle
   },
 })
