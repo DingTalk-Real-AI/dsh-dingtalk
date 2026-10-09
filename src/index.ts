@@ -336,7 +336,7 @@ async function startDigitalEmployee(
     modelOverrides,
     workspaceOverrides,
     modelSelection: currentDefault,
-    onAgentMessage: async (agent, msg) => {
+    onAgentMessage: async (agent, msg, sessionCwd) => {
       const event = eventsByMessageId.get(msg.msgId)
       eventsByMessageId.delete(msg.msgId)
       if (event) {
@@ -350,7 +350,7 @@ async function startDigitalEmployee(
           status: 'started',
         })
       }
-      void workspace.attach(agent.id)
+      void workspace.attach(agent.id, sessionCwd)
     },
     compose: async () => {
       const presets = (ctx as any).get?.('agentPresets') as HostAgentPresets | undefined
@@ -553,13 +553,13 @@ async function startAccount(
         return null
       }
     },
-    onAgentMessage: (agent, msg) => {
+    onAgentMessage: (agent, msg, sessionCwd) => {
       // A session may already be live because the Web UI loaded it before this
       // channel sees a message. Creation/resume setup is skipped in that path,
       // so attach the channel shadow through the live Agent.ctx as well.
       questions.installFor(agent)
       questions.bindSession(agent.id, msg)
-      void workspace.attach(agent.id)
+      void workspace.attach(agent.id, sessionCwd)
     },
     compose: async () => {
       // Optional service: a deployment without a roster runs preset-less

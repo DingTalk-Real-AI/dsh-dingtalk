@@ -84,6 +84,10 @@ jobs:
         if: matrix.dsh-version == '0.2.0-rc.2'
         shell: bash
         run: DSH_SMOKE_NODE_MODULES="$(npm root --global)" node scripts/smoke-agent-setup.mjs
+      - name: Validate workspace membership after switching directories
+        if: matrix.dsh-version == '0.2.0-rc.2'
+        shell: bash
+        run: DSH_SMOKE_NODE_MODULES="$(npm root --global)" node scripts/smoke-workspace.mjs
       - name: Pack public artifact
         id: pack
         shell: bash

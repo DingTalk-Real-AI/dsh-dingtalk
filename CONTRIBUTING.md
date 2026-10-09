@@ -36,7 +36,10 @@ corepack pnpm run ci
 smoke_dir=$(mktemp -d)
 npm install --prefix "$smoke_dir" --ignore-scripts --no-audit --no-fund @deepseek-ai/dsh@0.2.0-rc.2
 DSH_SMOKE_NODE_MODULES="$smoke_dir/node_modules" node scripts/smoke-agent-setup.mjs
+DSH_SMOKE_NODE_MODULES="$smoke_dir/node_modules" node scripts/smoke-workspace.mjs
 rm -rf "$smoke_dir"
 ```
 
 运行 smoke 前需已构建连接器。它验证真实宿主的创建、持久化恢复、已加载补装、重复安装与 setup 失败回滚后重试；真实钉钉端到端验收需另行执行。
+
+工作区 smoke 使用真实宿主的 WorkspaceRegistry、JSON 存储及会话服务，检查 `/cd`、`/new`、`/model`、恢复和已加载会话的 cwd 与显式工作区归属一致，以及 `/cd reset` 返回默认分组。它不启动钉钉 Channel、不发送消息、不调用模型。
