@@ -78,16 +78,20 @@ test('敏感审批只接受 operator 私聊中的精确一次性确认码', asyn
   }
   const manager = new DigitalEmployeeApprovalManager(runtime, 'operator-open-id', 1_000, () => {})
   let listener
-  manager.install({
-    on(name, value) {
-      if (name === 'approval/request') listener = value
-      return () => {}
+  const agent = { id: 'session-approval' }
+  manager.install(
+    {
+      on(name, value) {
+        if (name === 'approval/request') listener = value
+        return () => {}
+      },
     },
-  })
+    agent,
+  )
   manager.bindSession('session-approval', event)
   const approval = listener(
     {
-      agent: { id: 'session-approval' },
+      agent,
       toolName: 'bash',
       reason: '修改文件',
     },
@@ -158,13 +162,16 @@ test('DSH 原生用户问题通过文本 ReplySink 提问，并只消费原会�
   }
   const manager = new DigitalEmployeeApprovalManager(runtime, 'operator-open-id', 1_000, () => {})
   const agent = { id: 'session-question' }
-  manager.install({
-    agent,
-    on(name, listener) {
-      listeners.set(name, listener)
-      return () => listeners.delete(name)
+  manager.install(
+    {
+      agent,
+      on(name, listener) {
+        listeners.set(name, listener)
+        return () => listeners.delete(name)
+      },
     },
-  })
+    agent,
+  )
   manager.bindSession('session-question', event)
   const response = listeners.get('user-questions/request')(
     {
@@ -216,13 +223,16 @@ test('文字降级的取消、超时、未知投递和关闭均不调用下一�
       const agent = { id: 'fixture' }
       const manager = new DigitalEmployeeApprovalManager(sink, 'operator', 30, () => {})
       manager.bindSession(agent.id, event)
-      manager.install({
-        agent,
-        on(name, listener) {
-          listeners.set(name, listener)
-          return () => listeners.delete(name)
+      manager.install(
+        {
+          agent,
+          on(name, listener) {
+            listeners.set(name, listener)
+            return () => listeners.delete(name)
+          },
         },
-      })
+        agent,
+      )
       const abort = new AbortController()
       const result = listeners.get('approval/request')({ agent, toolName: 'fixture', signal: abort.signal }, () =>
         assert.fail('不得降级到 Web'),
@@ -281,8 +291,8 @@ test('文字审批审计等待中取消，审计晚返回不能放行；重复�
       return () => listeners.delete(name)
     },
   }
-  manager.install(ctx)
-  manager.install(ctx)
+  manager.install(ctx, agent)
+  manager.install(ctx, agent)
   manager.bindSession(agent.id, event)
   const abort = new AbortController()
   const result = listeners.get('approval/request')({ agent, toolName: 'fixture', signal: abort.signal }, () =>

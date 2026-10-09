@@ -2,9 +2,10 @@ import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { A2uiInteractions, type A2uiCard, type A2uiMessage, type A2uiPresentation } from './a2ui.js'
 import { sanitizedDwsEnvironment } from './digital-employee-reply-sink.js'
+import { registerScoped } from './scoped-registration.js'
 import type { DigitalEmployeeConfig } from './setup-state.js'
 import type { DigitalEmployeeEvent } from './digital-employee-types.js'
-import type { HostAgentContext, HostApprovalOutcome } from './host.js'
+import type { HostAgent, HostAgentContext, HostApprovalOutcome } from './host.js'
 import type { DigitalEmployeeAuditFields } from './digital-employee-audit.js'
 
 /** 数字员工默认接线：发卡前探测，未知投递结果不重试、不另开审批入口。 */
@@ -248,65 +249,64 @@ export function employeeA2ui(
       connected = false
       manager.close()
     },
-    install(ctx: HostAgentContext) {
+    install(ctx: HostAgentContext, agent: HostAgent) {
       if (closed || installations.has(ctx)) return
-      const agent = ctx.agent
-      if (!agent) return
-      const approvalOff = ctx.on(
-        'approval/request',
-        async (request, next) => {
-          if (request.agent !== agent) return next()
-          if (closed || JSON.stringify(employee) !== binding) return Promise.resolve('unavailable')
-          if (!available) return next()
-          // 订阅暂时离线时不能转到第二个授权通道；恢复连接后才接受新的卡片请求。
-          if (!connected) return Promise.resolve('unavailable')
-          const event = sessions.get(agent.id)
-          if (!event) return 'unavailable'
-          try {
-            await audit({
-              eventId: event.eventId,
-              sessionId: agent.id,
-              operationType: 'approval_request',
-              toolName: request.toolName,
-              status: 'started',
-            })
-            const auditDecision = (outcome: HostApprovalOutcome) =>
-              audit({
-                eventId: event.eventId,
-                sessionId: agent.id,
-                operationType: 'approval_response',
-                toolName: request.toolName,
-                status: outcome,
-              })
-            let decisionAttempted = false
-            const outcome = await manager.approve(request, async (decision) => {
-              decisionAttempted = true
-              await auditDecision(decision)
-            })
-            if (!decisionAttempted) await auditDecision(outcome)
-            if (request.signal?.aborted || closed || JSON.stringify(employee) !== binding) return 'cancelled'
-            return outcome
-          } catch {
-            log('a2ui approval audit failed; denied')
-            return 'unavailable'
-          }
-        },
-        { prepend: true },
-      )
-      const askOff = ctx.on(
-        'user-questions/request',
-        (request, next) => {
-          if (request.agent && request.agent !== agent) return next()
-          if (closed || JSON.stringify(employee) !== binding || (available && !connected))
-            return Promise.reject(new Error('a2ui_unavailable'))
-          return available ? manager.ask(agent.id, request) : next()
-        },
-        { prepend: true },
-      )
-      installations.set(ctx, () => {
-        approvalOff()
-        askOff()
-      })
+      const disposeListeners = registerScoped([
+        () =>
+          ctx.on(
+            'approval/request',
+            async (request, next) => {
+              if (request.agent !== agent) return next()
+              if (closed || JSON.stringify(employee) !== binding) return Promise.resolve('unavailable')
+              if (!available) return next()
+              // 订阅暂时离线时不能转到第二个授权通道；恢复连接后才接受新的卡片请求。
+              if (!connected) return Promise.resolve('unavailable')
+              const event = sessions.get(agent.id)
+              if (!event) return 'unavailable'
+              try {
+                await audit({
+                  eventId: event.eventId,
+                  sessionId: agent.id,
+                  operationType: 'approval_request',
+                  toolName: request.toolName,
+                  status: 'started',
+                })
+                const auditDecision = (outcome: HostApprovalOutcome) =>
+                  audit({
+                    eventId: event.eventId,
+                    sessionId: agent.id,
+                    operationType: 'approval_response',
+                    toolName: request.toolName,
+                    status: outcome,
+                  })
+                let decisionAttempted = false
+                const outcome = await manager.approve(request, async (decision) => {
+                  decisionAttempted = true
+                  await auditDecision(decision)
+                })
+                if (!decisionAttempted) await auditDecision(outcome)
+                if (request.signal?.aborted || closed || JSON.stringify(employee) !== binding) return 'cancelled'
+                return outcome
+              } catch {
+                log('a2ui approval audit failed; denied')
+                return 'unavailable'
+              }
+            },
+            { prepend: true },
+          ),
+        () =>
+          ctx.on(
+            'user-questions/request',
+            (request, next) => {
+              if (request.agent && request.agent !== agent) return next()
+              if (closed || JSON.stringify(employee) !== binding || (available && !connected))
+                return Promise.reject(new Error('a2ui_unavailable'))
+              return available ? manager.ask(agent.id, request) : next()
+            },
+            { prepend: true },
+          ),
+      ])
+      installations.set(ctx, disposeListeners)
     },
     bindSession: (session: string, event: DigitalEmployeeEvent) => sessions.set(session, event),
     handleInbound: async () => false,

@@ -33,7 +33,8 @@ if (args.includes('--local-lease')) {
 } else if (args.includes('consume')) {
   fs.writeFileSync(file('consumer-active'), String(process.pid), { flag: 'wx' })
   record('consumer-ready')
-  process.stderr.write('[event] ready event_count=0 bus_pid=123\n')
+  // 同一输出流保证 READY 先于事件，避免跨 fd 顺序竞态掩盖生命周期验证。
+  process.stdout.write('[event] ready event_count=0 bus_pid=123\n')
   process.stdout.write(
     JSON.stringify({
       type: 'user_im_message_receive_o2o_all',
@@ -60,7 +61,10 @@ if (args.includes('--local-lease')) {
     } else if (args.includes('reply')) {
       fs.writeFileSync(file('reply-active'), String(process.pid), { flag: 'wx' })
       record('reply-started')
-      setTimeout(() => {
+      // 下行保持在等待态，直到父测试开始卸载并显式释放；不依赖短暂的 300ms 重叠窗口。
+      const wait = setInterval(() => {
+        if (!fs.existsSync(file('reply-release'))) return
+        clearInterval(wait)
         fs.unlinkSync(file('reply-active'))
         record('reply-completed')
         envelope({
@@ -69,7 +73,7 @@ if (args.includes('--local-lease')) {
           idempotencyKey: value.idempotencyKey,
           deliveryStatus: 'delivered',
         })
-      }, 300)
+      }, 10)
     } else {
       throw new Error('unexpected_fixture_command')
     }

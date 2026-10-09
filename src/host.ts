@@ -1,9 +1,7 @@
 /**
  * Narrow structural contracts for the DSH host services this plugin consumes.
- * Shapes mirror `@deepseek-ai/dsh-agent` / `@deepseek-ai/dsh-session` as of
- * deepseek-harness main (2026-08). The host packages are private (unpublished),
- * so a composed DSH profile supplies the real implementations at runtime and
- * this package builds self-contained — the same approach dsh-lark uses.
+ * 契约与公开发布的 DSH 0.2.0-rc.2 对齐。宿主 profile 提供实际服务，
+ * 连接器仅声明所需结构，保持独立构建。Agent 通过 setup 第二参数传入。
  */
 
 declare const SessionIdBrand: unique symbol
@@ -106,8 +104,6 @@ export interface HostToolExecution {
 
 /** Agent-scoped services exposed during preset composition. */
 export interface HostAgentContext {
-  /** The owning Agent; DSH installs this as an own property on Agent.ctx. */
-  readonly agent?: HostAgent
   readonly tools: {
     register(definition: HostToolDefinition): () => void
   }
@@ -176,8 +172,16 @@ export interface HostUserQuestionAnswer {
   readonly answers: HostUserQuestionAnswerItem[]
 }
 
-/** Creation-time composition of the agent's scoped world (tools, prompt sections). */
-export type AgentSetup = (agentCtx: HostAgentContext) => Promise<void>
+/** setup 完成后、发布 Agent 前执行的同步提交。 */
+export interface AgentSetupCommit {
+  commit(): void
+}
+
+/** 创建或恢复时组合作用域；Agent 由宿主作为第二个参数提供。 */
+export type AgentSetup = (
+  agentCtx: HostAgentContext,
+  agent: HostAgent,
+) => AgentSetupCommit | Promise<AgentSetupCommit | void> | void
 
 /** Subset of the host `CreateAgentOptions`. */
 export interface CreateAgentOptions {

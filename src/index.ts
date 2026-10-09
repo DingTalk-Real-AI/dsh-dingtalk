@@ -52,6 +52,7 @@ import {
 } from './setup-state.js'
 import type {
   HostAgentContext,
+  HostAgent,
   HostAgentPresets,
   HostAgentRegistry,
   HostDefaultModel,
@@ -213,9 +214,9 @@ async function startDigitalEmployee(
     audit: (fields) => runtime.replySink.audit(fields),
   })
   const useCards = config.interactionMode !== 'text' && (await a2ui.prepare())
-  const installInteractions = (agentCtx: HostAgentContext) => {
-    approvals.install(agentCtx)
-    a2ui.install(agentCtx)
+  const installInteractions = (agentCtx: HostAgentContext, agent: HostAgent) => {
+    approvals.install(agentCtx, agent)
+    a2ui.install(agentCtx, agent)
   }
 
   const runtime = new DwsDigitalEmployeeSource({
@@ -341,7 +342,7 @@ async function startDigitalEmployee(
       if (event) {
         approvals.bindSession(agent.id, event)
         a2ui.bindSession(agent.id, event)
-        installInteractions(agent.ctx)
+        installInteractions(agent.ctx, agent)
         await replySink.audit({
           eventId: event.eventId,
           sessionId: agent.id,
@@ -353,19 +354,20 @@ async function startDigitalEmployee(
     },
     compose: async () => {
       const presets = (ctx as any).get?.('agentPresets') as HostAgentPresets | undefined
-      if (!presets) return { setup: async (agentCtx: HostAgentContext) => installInteractions(agentCtx) }
+      if (!presets)
+        return { setup: async (agentCtx: HostAgentContext, agent: HostAgent) => installInteractions(agentCtx, agent) }
       try {
         const resolved = await presets.resolve(undefined)
         return {
           agentPreset: resolved.id,
-          setup: async (agentCtx: HostAgentContext) => {
+          setup: async (agentCtx: HostAgentContext, agent: HostAgent) => {
             await presets.mount(agentCtx, resolved.id)
-            installInteractions(agentCtx)
+            installInteractions(agentCtx, agent)
           },
         }
       } catch (error) {
         log(`preset compose failed (${error instanceof Error ? error.message : error})`)
-        return { setup: async (agentCtx: HostAgentContext) => installInteractions(agentCtx) }
+        return { setup: async (agentCtx: HostAgentContext, agent: HostAgent) => installInteractions(agentCtx, agent) }
       }
     },
   })
@@ -564,20 +566,20 @@ async function startAccount(
       // (host-composition tools only), matching apiproxy's fallback.
       const presets = (ctx as any).get?.('agentPresets') as HostAgentPresets | undefined
       if (!presets) {
-        return { setup: async (agentCtx: HostAgentContext) => questions.install(agentCtx) }
+        return { setup: async (agentCtx: HostAgentContext, agent: HostAgent) => questions.install(agentCtx, agent) }
       }
       try {
         const resolved = await presets.resolve(undefined)
         return {
           agentPreset: resolved.id,
-          setup: async (agentCtx: HostAgentContext) => {
+          setup: async (agentCtx: HostAgentContext, agent: HostAgent) => {
             await presets.mount(agentCtx, resolved.id)
-            questions.install(agentCtx)
+            questions.install(agentCtx, agent)
           },
         }
       } catch (err) {
         log(`preset compose failed (${err instanceof Error ? err.message : err}); continuing with DingTalk tools only`)
-        return { setup: async (agentCtx: HostAgentContext) => questions.install(agentCtx) }
+        return { setup: async (agentCtx: HostAgentContext, agent: HostAgent) => questions.install(agentCtx, agent) }
       }
     },
   })

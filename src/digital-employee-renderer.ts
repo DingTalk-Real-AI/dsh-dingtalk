@@ -1,6 +1,8 @@
 import { randomBytes } from 'node:crypto'
+import { registerScoped } from './scoped-registration.js'
 import type {
   HostAgentContext,
+  HostAgent,
   HostApprovalOutcome,
   HostSession,
   HostSessionEvent,
@@ -146,160 +148,160 @@ export class DigitalEmployeeApprovalManager {
     if (!this.closed) this.sessionEvents.set(sessionId, event)
   }
 
-  install(ctx: HostAgentContext): void {
+  install(ctx: HostAgentContext, agent: HostAgent): void {
     if (this.closed || this.installations.has(ctx)) return
-    const questionOff = ctx.on(
-      'user-questions/request',
-      (request, next) => {
-        const agent = request.agent ?? ctx.agent
-        if (ctx.agent && agent !== ctx.agent) return next()
-        const event = agent ? this.sessionEvents.get(agent.id) : undefined
-        if (!agent || !event) return next()
-        if (this.closed || request.signal?.aborted || !request.questions.length)
-          return Promise.reject(new Error('question_unavailable'))
-        if (
-          this.approvals.has(agent.id) ||
-          this.questions.has(agent.id) ||
-          [...this.questions.values()].some(
-            (q) =>
-              q.event.conversationId === event.conversationId &&
-              q.event.senderOpenDingTalkId === event.senderOpenDingTalkId,
-          )
-        )
-          return Promise.reject(new Error('interaction_already_pending'))
-        return new Promise<HostUserQuestionAnswer>((resolve, reject) => {
-          let done = false
-          const onAbort = () => pending.finish()
-          const pending: QuestionState = {
-            event,
-            request,
-            ready: false,
-            finish: (answer) => {
-              if (done) return
-              done = true
-              clearTimeout(timer)
-              request.signal?.removeEventListener('abort', onAbort)
-              this.questions.delete(agent.id)
-              if (answer) resolve(answer)
-              else {
-                const error = new Error('question_cancelled_or_unavailable')
-                if (request.signal?.aborted) error.name = 'AbortError'
-                reject(error)
-              }
-            },
-          }
-          const timer = setTimeout(() => pending.finish(), this.questionTimeoutMs)
-          this.questions.set(agent.id, pending)
-          request.signal?.addEventListener('abort', onAbort, { once: true })
-          if (request.signal?.aborted) {
-            onAbort()
-            return
-          }
-          const sequence = ++this.questionSequence
-          void Promise.resolve()
-            .then(() => {
-              if (done) return
-              return this.runtime.reply(
+    const disposeListeners = registerScoped([
+      () =>
+        ctx.on(
+          'user-questions/request',
+          (request, next) => {
+            if (request.agent && request.agent !== agent) return next()
+            const event = this.sessionEvents.get(agent.id)
+            if (!event) return next()
+            if (this.closed || request.signal?.aborted || !request.questions.length)
+              return Promise.reject(new Error('question_unavailable'))
+            if (
+              this.approvals.has(agent.id) ||
+              this.questions.has(agent.id) ||
+              [...this.questions.values()].some(
+                (q) =>
+                  q.event.conversationId === event.conversationId &&
+                  q.event.senderOpenDingTalkId === event.senderOpenDingTalkId,
+              )
+            )
+              return Promise.reject(new Error('interaction_already_pending'))
+            return new Promise<HostUserQuestionAnswer>((resolve, reject) => {
+              let done = false
+              const onAbort = () => pending.finish()
+              const pending: QuestionState = {
                 event,
-                agent.id,
-                renderQuestions(request.questions),
-                `question_prompt_${sequence}`,
-              )
-            })
-            .then((delivery) => {
-              if (done) return
-              if (delivery?.deliveryStatus === 'delivered') pending.ready = true
-              else pending.finish()
-            })
-            .catch(() => {
-              pending.finish()
-              this.log('question delivery failed; no alternate channel')
-            })
-        })
-      },
-      { prepend: true },
-    )
-    const approvalOff = ctx.on(
-      'approval/request',
-      (request, next) => {
-        if (ctx.agent && request.agent !== ctx.agent) return next()
-        const sessionId = request.agent.id
-        const event = this.sessionEvents.get(sessionId)
-        if (!event) return next()
-        if (this.closed || request.signal?.aborted) return Promise.resolve('cancelled')
-        if (this.approvals.has(sessionId) || this.questions.has(sessionId)) return Promise.resolve('unavailable')
-        let code: string
-        do {
-          code = randomBytes(3).toString('hex').toUpperCase()
-        } while ([...this.approvals.values()].some((pending) => pending.code === code))
-        return new Promise<HostApprovalOutcome>((resolve) => {
-          let done = false
-          const onAbort = () => pending.finish('cancelled')
-          const pending: ApprovalState = {
-            code,
-            toolName: request.toolName,
-            ready: false,
-            responding: false,
-            finish: (outcome) => {
-              if (done) return
-              done = true
-              clearTimeout(timer)
-              request.signal?.removeEventListener('abort', onAbort)
-              this.approvals.delete(sessionId)
-              resolve(outcome)
-            },
-          }
-          const timer = setTimeout(() => pending.finish('unavailable'), this.timeoutMs)
-          this.approvals.set(sessionId, pending)
-          request.signal?.addEventListener('abort', onAbort, { once: true })
-          if (request.signal?.aborted) {
-            onAbort()
-            return
-          }
-          void Promise.resolve()
-            .then(() => {
-              if (done) return
-              return this.runtime.operatorPrivate(
-                [
-                  'DSH 数字员工请求敏感操作审批',
-                  `工具：${request.toolName}`,
-                  request.reason ? `原因：${request.reason}` : '',
-                  `允许一次请回复：确认 ${code}`,
-                  `拒绝请回复：拒绝 ${code}`,
-                ]
-                  .filter(Boolean)
-                  .join('\n'),
-                'approval_request',
-              )
-            })
-            .then(async (delivery) => {
-              if (done) return
-              if (delivery?.deliveryStatus !== 'delivered') {
-                pending.finish('unavailable')
+                request,
+                ready: false,
+                finish: (answer) => {
+                  if (done) return
+                  done = true
+                  clearTimeout(timer)
+                  request.signal?.removeEventListener('abort', onAbort)
+                  this.questions.delete(agent.id)
+                  if (answer) resolve(answer)
+                  else {
+                    const error = new Error('question_cancelled_or_unavailable')
+                    if (request.signal?.aborted) error.name = 'AbortError'
+                    reject(error)
+                  }
+                },
+              }
+              const timer = setTimeout(() => pending.finish(), this.questionTimeoutMs)
+              this.questions.set(agent.id, pending)
+              request.signal?.addEventListener('abort', onAbort, { once: true })
+              if (request.signal?.aborted) {
+                onAbort()
                 return
               }
-              await this.runtime.audit({
-                eventId: event.eventId,
-                sessionId,
-                operationType: 'approval_request',
+              const sequence = ++this.questionSequence
+              void Promise.resolve()
+                .then(() => {
+                  if (done) return
+                  return this.runtime.reply(
+                    event,
+                    agent.id,
+                    renderQuestions(request.questions),
+                    `question_prompt_${sequence}`,
+                  )
+                })
+                .then((delivery) => {
+                  if (done) return
+                  if (delivery?.deliveryStatus === 'delivered') pending.ready = true
+                  else pending.finish()
+                })
+                .catch(() => {
+                  pending.finish()
+                  this.log('question delivery failed; no alternate channel')
+                })
+            })
+          },
+          { prepend: true },
+        ),
+      () =>
+        ctx.on(
+          'approval/request',
+          (request, next) => {
+            if (request.agent !== agent) return next()
+            const sessionId = request.agent.id
+            const event = this.sessionEvents.get(sessionId)
+            if (!event) return next()
+            if (this.closed || request.signal?.aborted) return Promise.resolve('cancelled')
+            if (this.approvals.has(sessionId) || this.questions.has(sessionId)) return Promise.resolve('unavailable')
+            let code: string
+            do {
+              code = randomBytes(3).toString('hex').toUpperCase()
+            } while ([...this.approvals.values()].some((pending) => pending.code === code))
+            return new Promise<HostApprovalOutcome>((resolve) => {
+              let done = false
+              const onAbort = () => pending.finish('cancelled')
+              const pending: ApprovalState = {
+                code,
                 toolName: request.toolName,
-                status: delivery.deliveryStatus,
-                replyMessageId: delivery.openMessageId,
-              })
-              if (!done) pending.ready = true
+                ready: false,
+                responding: false,
+                finish: (outcome) => {
+                  if (done) return
+                  done = true
+                  clearTimeout(timer)
+                  request.signal?.removeEventListener('abort', onAbort)
+                  this.approvals.delete(sessionId)
+                  resolve(outcome)
+                },
+              }
+              const timer = setTimeout(() => pending.finish('unavailable'), this.timeoutMs)
+              this.approvals.set(sessionId, pending)
+              request.signal?.addEventListener('abort', onAbort, { once: true })
+              if (request.signal?.aborted) {
+                onAbort()
+                return
+              }
+              void Promise.resolve()
+                .then(() => {
+                  if (done) return
+                  return this.runtime.operatorPrivate(
+                    [
+                      'DSH 数字员工请求敏感操作审批',
+                      `工具：${request.toolName}`,
+                      request.reason ? `原因：${request.reason}` : '',
+                      `允许一次请回复：确认 ${code}`,
+                      `拒绝请回复：拒绝 ${code}`,
+                    ]
+                      .filter(Boolean)
+                      .join('\n'),
+                    'approval_request',
+                  )
+                })
+                .then(async (delivery) => {
+                  if (done) return
+                  if (delivery?.deliveryStatus !== 'delivered') {
+                    pending.finish('unavailable')
+                    return
+                  }
+                  await this.runtime.audit({
+                    eventId: event.eventId,
+                    sessionId,
+                    operationType: 'approval_request',
+                    toolName: request.toolName,
+                    status: delivery.deliveryStatus,
+                    replyMessageId: delivery.openMessageId,
+                  })
+                  if (!done) pending.ready = true
+                })
+                .catch(() => {
+                  pending.finish('unavailable')
+                  this.log('operator approval delivery failed; no alternate channel')
+                })
             })
-            .catch(() => {
-              pending.finish('unavailable')
-              this.log('operator approval delivery failed; no alternate channel')
-            })
-        })
-      },
-      { prepend: true },
-    )
-    this.installations.set(ctx, () => {
-      questionOff()
-      approvalOff()
-    })
+          },
+          { prepend: true },
+        ),
+    ])
+    this.installations.set(ctx, disposeListeners)
   }
 
   async handleInbound(input: DigitalEmployeeInbound): Promise<boolean> {

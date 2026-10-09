@@ -55,13 +55,16 @@ test(
       conversationId: 'fixture-chat',
       senderOpenDingTalkId: 'fixture-operator',
     })
-    adapter.install({
-      agent,
-      on(name, listener) {
-        listeners.set(name, listener)
-        return () => listeners.delete(name)
+    adapter.install(
+      {
+        agent,
+        on(name, listener) {
+          listeners.set(name, listener)
+          return () => listeners.delete(name)
+        },
       },
-    })
+      agent,
+    )
     const answer = listeners.get('user-questions/request')(
       { agent, questions: [{ id: 'note', question: '填写备注' }] },
       () => assert.fail('不应回退'),
