@@ -76,6 +76,27 @@ async function waitFor(check) {
   }
   assert.fail(`fixture ${mode} 等待超时`)
 }
+async function releaseReplies() {
+  await Promise.all(
+    employeeIds.map((id) =>
+      writeFile(path.join(process.env.DSH_HOME, id, 'reply-release'), 'release').catch((error) => {
+        if (error.code !== 'ENOENT') throw error
+      }),
+    ),
+  )
+}
+
+async function stopWithPendingReplies(stop) {
+  let completed = false
+  const stopping = stop().then(() => {
+    completed = true
+  })
+  await delay(30)
+  assert.equal(completed, false, '下行尚未释放时不能确认卸载完成')
+  await releaseReplies()
+  await stopping
+}
+
 async function assertReleased(count) {
   for (const id of employeeIds) {
     const employeeDir = path.join(process.env.DSH_HOME, id)
@@ -173,7 +194,7 @@ try {
       )
     }
     if (mode === 'reload') {
-      await fiber.restart()
+      await stopWithPendingReplies(() => fiber.restart())
       for (const employee of config.digitalEmployees) {
         assert.equal(
           (await requestEmployeeControl({ ...identity, ...employeeIdentity(employee) })).transportReady,
@@ -191,10 +212,13 @@ try {
     }
     const signal = mode.replace(/^owned-/, '')
     if (signal.startsWith('SIG')) {
-      await new Promise((resolve, reject) => {
-        process.once(signal, () => root.fiber.dispose().then(resolve, reject))
-        process.kill(process.pid, signal)
-      })
+      await stopWithPendingReplies(
+        () =>
+          new Promise((resolve, reject) => {
+            process.once(signal, () => root.fiber.dispose().then(resolve, reject))
+            process.kill(process.pid, signal)
+          }),
+      )
     } else await root.fiber.dispose()
     if (config.digitalEmployees.length) await assertReleased(mode === 'reload' ? 2 : 1)
   }
@@ -207,6 +231,8 @@ try {
   code = 1
   console.error(error)
 } finally {
+  // 失败路径也释放测试屏障，保留原始失败而不让清理无限等待。
+  await releaseReplies()
   await replacement?.close()
   await root.fiber.dispose()
   // 旧版本可能泄漏 socket；隔离子进程退出，不能让红测试拖住整个 test runner。

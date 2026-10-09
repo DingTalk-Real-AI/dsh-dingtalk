@@ -39,6 +39,10 @@ mock.module('../lib/digital-employee-lease.js', {
     },
   },
 })
+// 控制入口由独立生命周期测试覆盖，setup 契约测试不依赖平台 socket。
+mock.module('../lib/digital-employee-control.js', {
+  namedExports: { serveEmployeeControl: async () => ({ async close() {} }) },
+})
 mock.module('../lib/bridge.js', { namedExports: { Bridge } })
 mock.module('../lib/inbound-source.js', { namedExports: { RobotStreamSource } })
 mock.module('../lib/digital-employee-runtime.js', { namedExports: { DwsDigitalEmployeeSource } })
