@@ -4,6 +4,7 @@ const args = process.argv.slice(2)
 fs.appendFileSync(process.env.A2UI_FIXTURE_LOG, JSON.stringify(args) + '\n')
 if (args.includes('--help')) {
   const mode = process.env.A2UI_FIXTURE_MODE
+  if (mode === 'require-no-update-check' && process.env.DWS_NO_UPDATE_CHECK !== '1') process.exit(2)
   if (mode === 'no-commands') process.exit(1)
   const help = args.includes('consume')
     ? '--flatten user_card_action_triggered'

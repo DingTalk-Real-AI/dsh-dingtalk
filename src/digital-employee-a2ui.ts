@@ -33,7 +33,8 @@ export function employeeA2ui(
     const call = new Promise<unknown>((resolve, reject) => {
       if (signal.aborted) return reject(new Error('a2ui_aborted'))
       const child = spawn('dws', [...args, '--profile', employee.dwsProfile, '--format', 'json'], {
-        env: sanitizedDwsEnvironment(process.env),
+        // 机器调用不等待 CLI 更新检查，避免本地 Help 探测被联网检查拖到超时。
+        env: { ...sanitizedDwsEnvironment(process.env), DWS_NO_UPDATE_CHECK: '1' },
         stdio: ['ignore', 'pipe', 'pipe'],
       })
       let output = ''

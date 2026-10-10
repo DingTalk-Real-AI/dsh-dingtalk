@@ -504,7 +504,7 @@ function createHost(interact) {
           followup(message) {
             followups.push({ sessionId: options.sessionId, message })
             queueMicrotask(async () => {
-              await interact?.(agent, scoped)
+              await interact?.(agent, scoped, (name, request, next) => scope.root.waterfall(agent, name, request, next))
               emit(
                 'session/event',
                 { id: options.sessionId },
@@ -516,7 +516,8 @@ function createHost(interact) {
           steer() {},
           cancel() {},
         }
-        await options.setup?.(agentCtx, agent)
+        // 当前 DSH setup 仅传上下文；Agent 在 create 返回后才交给 Channel。
+        await options.setup?.(agentCtx)
         agents.set(options.sessionId, agent)
         sessions.push({ sessionId: options.sessionId, scoped })
         return { agent, dispose: async () => {} }
@@ -568,6 +569,81 @@ function pluginConfig(workspace, digitalEmployees) {
     debug: false,
   }
 }
+
+test('上下文单参数 setup 后，文字审批由钉钉接管并可取消', { skip: process.platform === 'win32' }, async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-text-approval-'))
+  const keys = ['PATH', 'FAKE_DWS_RECORD', 'DSH_DINGTALK_STATE_DIR', 'FAKE_DWS_A2UI']
+  const old = Object.fromEntries(keys.map((key) => [key, process.env[key]]))
+  const binDir = path.join(root, 'bin')
+  await mkdir(binDir)
+  await createFakeDws(binDir, true)
+  const recordFile = path.join(root, 'calls.jsonl')
+  Object.assign(process.env, {
+    PATH: `${binDir}${path.delimiter}${process.env.PATH}`,
+    FAKE_DWS_RECORD: recordFile,
+    DSH_DINGTALK_STATE_DIR: path.join(root, 'state'),
+    FAKE_DWS_A2UI: '0',
+  })
+  const outcomes = [],
+    errors = []
+  let webCalls = 0
+  const host = createHost(async (agent, _scoped, dispatch) => {
+    const controller = new AbortController()
+    try {
+      const answer = dispatch(
+        'approval/request',
+        { agent, toolName: 'fixture_noop', signal: controller.signal },
+        () => {
+          webCalls++
+          return Promise.resolve('unavailable')
+        },
+      )
+      await waitFor(async () => {
+        const raw = await readFile(
+          path.join(root, 'state', 'digital-employees', employee.agentUuid, 'audit', `${employee.agentUuid}.jsonl`),
+          'utf8',
+        ).catch(() => '')
+        return raw
+          .split('\n')
+          .filter(Boolean)
+          .map(JSON.parse)
+          .some((item) => item.operationType === 'approval_request' && item.status === 'delivered')
+      })
+      controller.abort()
+      outcomes.push(await answer)
+    } catch (error) {
+      errors.push(error)
+    } finally {
+      controller.abort()
+    }
+  })
+  t.after(async () => {
+    await host.dispose()
+    for (const key of keys) {
+      if (old[key] === undefined) delete process.env[key]
+      else process.env[key] = old[key]
+    }
+    await rm(root, { recursive: true, force: true })
+  })
+  await apply(host.ctx, { ...pluginConfig(path.join(root, 'workspace'), [employee]), interactionMode: 'text' })
+  await waitFor(() => outcomes.length || errors.length)
+  assert.deepEqual(errors, [])
+  assert.deepEqual(outcomes, ['cancelled'])
+  assert.equal(webCalls, 0)
+  const audit = (
+    await readFile(
+      path.join(root, 'state', 'digital-employees', employee.agentUuid, 'audit', `${employee.agentUuid}.jsonl`),
+      'utf8',
+    )
+  )
+    .trim()
+    .split('\n')
+    .map(JSON.parse)
+  assert.equal(
+    audit.filter((item) => item.operationType === 'approval_request' && item.status === 'delivered').length,
+    1,
+  )
+})
 
 test(
   '默认 apply 接线并随员工停止释放：原生 ask 回调恢复，未决定的审批取消',
