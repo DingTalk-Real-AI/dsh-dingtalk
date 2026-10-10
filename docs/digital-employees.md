@@ -44,7 +44,7 @@ release 在上述停止完成后删除目标注册配置；普通 stop 保留配
 dsh-dingtalk digital-employee unregister --agent-uuid <uuid> --json --yes
 ```
 
-注册后运行交互式 `setup`，选择“管理数字员工 operator 与白名单”。新员工默认只有 operator 可私聊，额外私聊白名单和群白名单均为空。配置只保存稳定身份和 Profile selector，不保存 DWS 凭据。
+注册后运行交互式 `setup`，选择“管理数字员工 operator 与白名单”。通过 DWS manage/connect 管理的 local_agent 使用 DEAP 已发布可见范围，额外私聊白名单和群白名单不参与授权；其他本地场景默认只有 operator 可私聊。配置只保存稳定身份和 Profile selector，不保存 DWS 凭据。
 
 ## DWS/DSH 协议
 
@@ -86,7 +86,8 @@ DSH 同时排空 stdout/stderr，只有 ready 行匹配 `^\[event\] ready(?:\s|$
 
 ## 本地运行与隔离
 
-- 单聊只接受 operator 或 `allowedDirectSenders`；群聊只接受 `allowedGroups`。
+- 支持 `visibilityAccess` 的 DWS 通过 `channel binding` 为每条消息返回访问判定：local_agent 的私聊、群聊均按 DEAP 已发布成员/部门/本企业全员范围校验，不叠加本地白名单。变更 set-visibility 草稿后须 publish；撤销后下一条消息重新查询。查询失败、身份不符或协议格式错误时拒绝处理，不回退白名单，且不写入事件去重记录。
+- 其他本地场景单聊接受 operator 或 `allowedDirectSenders`，群聊接受 `allowedGroups`；旧 DWS 未声明此能力时保留旧行为，启用新策略须同时升级 DWS。旧服务端绑定需用原管理账号执行 `connect restart` 固定查询 Profile。
 - 未授权消息静默丢弃，只上报无正文的拒绝审计。
 - 敏感操作优先通过 operator 私聊的 A2UI 卡片审批；能力不可用时使用 operator 私聊一次性确认码。白名单普通成员不能批准。
 - 会话键包含 `agentUuid + conversationId`；`chat-sender` 还包含发送者身份。

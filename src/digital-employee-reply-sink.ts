@@ -16,6 +16,7 @@ interface DwsCapabilities {
     replyStdin: true
     operatorPrivateStdin: true
     chatDelivery?: boolean
+    visibilityAccess?: boolean
   }
 }
 
@@ -61,6 +62,7 @@ function idempotencyKey(employee: DigitalEmployeeConfig, event: DigitalEmployeeE
 /** DWS 的安全 stdin 回复、operator 私聊、审计与能力探测客户端。 */
 export class DwsDigitalEmployeeReplySink implements DigitalEmployeeControlSink {
   private useChatDelivery = false
+  private useVisibilityAccess = false
   private readonly activeCalls = new Set<Promise<unknown>>()
   private readonly pendingReplies = new Map<string, Set<Promise<unknown>>>()
 
@@ -277,6 +279,7 @@ export class DwsDigitalEmployeeReplySink implements DigitalEmployeeControlSink {
       throw new Error('incompatible_dws_capabilities')
     }
     this.useChatDelivery = capabilities.chatDelivery === true
+    this.useVisibilityAccess = capabilities.visibilityAccess === true
     await this.audit({ operationType: 'runtime_start', status: 'ready' })
   }
 
@@ -295,7 +298,7 @@ export class DwsDigitalEmployeeReplySink implements DigitalEmployeeControlSink {
     if (pending.length) await Promise.allSettled(pending)
   }
 
-  async verifyBinding(): Promise<void> {
+  private async queryBinding(event?: DigitalEmployeeEvent): Promise<Record<string, unknown>> {
     const employee = this.options.employee
     const result = (await this.execJson(
       [
@@ -310,7 +313,11 @@ export class DwsDigitalEmployeeReplySink implements DigitalEmployeeControlSink {
         '--format',
         'json',
       ],
-      { agentUuid: employee.agentUuid, bindingRevision: employee.bindingRevision ?? 0 },
+      {
+        agentUuid: employee.agentUuid,
+        bindingRevision: employee.bindingRevision ?? 0,
+        ...(event ? { senderOpenDingTalkId: event.senderOpenDingTalkId, senderName: event.senderName } : {}),
+      },
     )) as Record<string, unknown>
     if (
       result.agentUuid !== employee.agentUuid ||
@@ -321,6 +328,21 @@ export class DwsDigitalEmployeeReplySink implements DigitalEmployeeControlSink {
       result.desiredState !== 'running'
     )
       throw new Error('binding_not_authorized')
+    return result
+  }
+
+  async verifyBinding(): Promise<void> {
+    await this.queryBinding()
+  }
+
+  async visibilityAccess(event: DigitalEmployeeEvent): Promise<boolean | undefined> {
+    if (!this.useVisibilityAccess) return undefined
+    const result = await this.queryBinding(event)
+    if (result.accessPolicy === 'local_allowlist') return undefined
+    if (result.accessPolicy !== 'deap_visibility' || typeof result.allowed !== 'boolean') {
+      throw new Error('invalid_visibility_access')
+    }
+    return result.allowed
   }
 
   private trackPendingReply(conversationId: string, delivery: Promise<unknown>): void {

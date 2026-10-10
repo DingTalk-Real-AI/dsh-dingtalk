@@ -357,7 +357,14 @@ export class DwsDigitalEmployeeSource implements InboundSource {
   private async handleEvent(event: DigitalEmployeeEvent): Promise<void> {
     if (this.stopped) return
     if (this.ledger.hasEvent(event.eventId) || this.ledger.hasSentMessage(event.messageId)) return
-    const allowed = authorizeDigitalEmployeeEvent(this.options.employee, event)
+    let visibility: boolean | undefined
+    try {
+      visibility = await this.replySink.visibilityAccess(event)
+    } catch {
+      await this.replySink.audit({ eventId: event.eventId, operationType: 'access_check', status: 'unavailable' })
+      throw new Error('visibility_access_unavailable')
+    }
+    const allowed = visibility ?? authorizeDigitalEmployeeEvent(this.options.employee, event)
     if (!allowed) {
       await this.replySink.audit({ eventId: event.eventId, operationType: 'access_check', status: 'denied' })
       this.ledger.markEvent(event.eventId)

@@ -1131,3 +1131,48 @@ test(
     assert.equal(afterRestart, beforeRestart)
   },
 )
+
+for (const scenario of ['visible', 'revoked', 'unavailable', 'local']) {
+  test(`访问策略 ${scenario} 在调度前生效且查询失败不消费事件`, async (t) => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'employee-visibility-'))
+    const seen = []
+    const audits = []
+    const runtime = new DwsDigitalEmployeeSource({
+      employee,
+      stateDir: path.join(root, 'state'),
+      log() {},
+      onMessage(input) {
+        seen.push(input)
+      },
+    })
+    t.after(async () => {
+      await runtime.stop()
+      await rm(root, { recursive: true, force: true })
+    })
+    runtime.replySink.audit = async (fields) => audits.push(fields)
+    runtime.replySink.visibilityAccess = async () => {
+      if (scenario === 'unavailable') throw new Error('query_failed')
+      return scenario === 'local' ? undefined : scenario === 'visible'
+    }
+    const event = {
+      schemaVersion: 1,
+      eventId: 'visibility-event',
+      messageId: 'visibility-message',
+      conversationId: 'unlisted-chat',
+      conversationType: 'direct',
+      senderOpenDingTalkId: scenario === 'visible' ? 'unlisted-person' : 'operator-open-id',
+      senderName: '成员',
+      text: 'hello',
+      createdAt: '1',
+    }
+    if (scenario === 'unavailable') {
+      await assert.rejects(runtime.handleEvent(event), /visibility_access_unavailable/)
+      assert.equal(runtime.ledger.hasEvent(event.eventId), false)
+    } else await runtime.handleEvent(event)
+    assert.equal(seen.length, scenario === 'visible' || scenario === 'local' ? 1 : 0)
+    assert.equal(
+      audits[0].status,
+      scenario === 'unavailable' ? 'unavailable' : scenario === 'revoked' ? 'denied' : 'accepted',
+    )
+  })
+}

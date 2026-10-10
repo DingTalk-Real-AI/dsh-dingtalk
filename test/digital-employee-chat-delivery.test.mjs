@@ -222,3 +222,30 @@ test('本地联合验收：DSH → 实际 DWS → 受控 MCP', { skip: !process.
     })
   }
 })
+
+for (const policy of ['deap_visibility', 'local_allowlist', 'invalid']) {
+  test(`绑定访问判定 ${policy}，严校验响应身份且不退回本地放行`, async () => {
+    const client = sink()
+    client.useVisibilityAccess = true
+    let returned = {
+      agentUuid: employee.agentUuid,
+      dwsProfile: employee.dwsProfile,
+      channel: 'dsh',
+      bindingRevision: 7,
+      bindingState: 'bound',
+      desiredState: 'running',
+      accessPolicy: policy,
+      allowed: false,
+    }
+    client.execJson = async (args, input) => {
+      assert.ok(args.includes('binding'))
+      assert.equal(input.senderOpenDingTalkId, 'open-sender')
+      return returned
+    }
+    const inbound = { ...event, senderOpenDingTalkId: 'open-sender', senderName: 'name' }
+    if (policy === 'invalid') await assert.rejects(client.visibilityAccess(inbound), /invalid_visibility_access/)
+    else assert.equal(await client.visibilityAccess(inbound), policy === 'local_allowlist' ? undefined : false)
+    returned = { ...returned, agentUuid: 'wrong' }
+    await assert.rejects(client.visibilityAccess(inbound), /binding_not_authorized/)
+  })
+}
