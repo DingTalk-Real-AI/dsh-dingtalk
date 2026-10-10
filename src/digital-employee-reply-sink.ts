@@ -279,6 +279,10 @@ export class DwsDigitalEmployeeReplySink implements DigitalEmployeeControlSink {
     await this.queryBinding()
   }
 
+  requiresGroupMention(): boolean {
+    return this.useGroupMembershipAccess
+  }
+
   async visibilityAccess(event: DigitalEmployeeEvent): Promise<boolean | undefined> {
     if (!this.useVisibilityAccess) return undefined
     const result = await this.queryBinding(event)

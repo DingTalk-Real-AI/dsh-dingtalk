@@ -1186,3 +1186,40 @@ for (const scenario of ['visible', 'revoked', 'unavailable', 'local']) {
     )
   })
 }
+
+for (const mentioned of [true, false]) {
+  test(`群聊只有原生 @ 才触发 ${mentioned}`, async (t) => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'employee-mention-'))
+    const seen = []
+    const runtime = new DwsDigitalEmployeeSource({
+      employee,
+      stateDir: path.join(root, 'state'),
+      log() {},
+      onMessage(input) {
+        seen.push(input)
+      },
+    })
+    t.after(async () => {
+      await runtime.stop()
+      await rm(root, { recursive: true, force: true })
+    })
+    runtime.replySink.useGroupMembershipAccess = true
+    runtime.replySink.visibilityAccess = async () => true
+    runtime.replySink.audit = async () => {}
+    assert.ok(runtime.subscriptionTopics().includes('user_im_message_receive_at'))
+    assert.ok(!runtime.subscriptionTopics().includes('user_im_message_receive_group_all'))
+    await runtime.handleEvent({
+      schemaVersion: 1,
+      eventId: 'mention-check',
+      messageId: 'mention-message',
+      conversationId: 'joined-group',
+      conversationType: 'group',
+      isMention: mentioned,
+      senderOpenDingTalkId: 'member',
+      senderName: '成员',
+      text: '普通正文也可能包含 @1010 字样',
+      createdAt: '1',
+    })
+    assert.equal(seen.length, mentioned ? 1 : 0)
+  })
+}
