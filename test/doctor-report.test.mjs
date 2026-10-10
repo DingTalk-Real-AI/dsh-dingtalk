@@ -252,6 +252,13 @@ test('数字员工诊断按员工输出 Profile、能力、ready、订阅、事�
       'digital-employee.audit-observed',
     ],
   )
+  await writeFile(
+    path.join(runtimeDir, 'runtime.json'),
+    JSON.stringify({ state: 'failed', observedAt: Date.now(), failureCode: 'incompatible_dws_capabilities' }),
+  )
+  const incompatible = await collectDoctorReport({ mode: 'offline', dshHome, stateDir })
+  const failure = incompatible.digitalEmployees[0].checks.find((check) => check.code === 'digital-employee.failed')
+  assert.match(failure.message, /请升级 DWS.*chatDelivery=true/)
   assert.doesNotMatch(
     JSON.stringify(report),
     /operator-private-id|direct-private-id|group-private-id|chat-private-body/,

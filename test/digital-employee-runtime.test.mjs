@@ -115,7 +115,7 @@ test('订阅断线后的迟到成功回复不能恢复 ready 或重新开启卡�
 const fs = require('node:fs')
 const args = process.argv.slice(2)
 if (args.includes('capabilities')) {
-  process.stdout.write(JSON.stringify({ ok: true, outcome: 'success', data: { schemaVersion: 1, protocolVersion: 1, auditMode: 'local_required', capabilities: { eventConsume: true, replyStdin: true, operatorPrivateStdin: true } }, meta: {} }))
+  process.stdout.write(JSON.stringify({ ok: true, outcome: 'success', data: { schemaVersion: 1, protocolVersion: 1, auditMode: 'local_required', capabilities: { eventConsume: true, chatDelivery: true } }, meta: {} }))
 } else if (args.includes('consume')) {
   process.stderr.write('[event] ready\\nretryable=false\\n')
   setInterval(() => { if (fs.existsSync(args[0])) process.exit(1) }, 5)
@@ -126,7 +126,7 @@ if (args.includes('capabilities')) {
   process.stdin.setEncoding('utf8')
   process.stdin.on('data', (chunk) => { input += chunk })
   process.stdin.on('end', () => {
-    const value = JSON.parse(input)
+    const value = args.includes('binding') ? JSON.parse(input) : { conversationId: args[args.indexOf('--group') + 1], idempotencyKey: args[args.indexOf('--idempotency-key') + 1] }
     process.stdout.write(JSON.stringify({ ok: true, outcome: 'success', data: { openMessageId: 'fixture-late-reply', conversationId: value.conversationId, deliveryStatus: 'delivered', idempotencyKey: value.idempotencyKey }, meta: {} }))
   })
 }
@@ -188,7 +188,7 @@ const args = process.argv.slice(2)
 const file = (name) => path.join(args[0], name)
 const envelope = (data) => process.stdout.write(JSON.stringify({ ok: true, outcome: 'success', data, meta: {} }))
 if (args.includes('capabilities')) {
-  envelope({ schemaVersion: 1, protocolVersion: 1, auditMode: 'local_required', capabilities: { eventConsume: true, replyStdin: true, operatorPrivateStdin: true } })
+  envelope({ schemaVersion: 1, protocolVersion: 1, auditMode: 'local_required', capabilities: { eventConsume: true, chatDelivery: true } })
 } else if (args.includes('consume')) {
   const count = fs.existsSync(file('consume-count')) ? Number(fs.readFileSync(file('consume-count'), 'utf8')) + 1 : 1
   fs.writeFileSync(file('consume-count'), String(count))
@@ -208,12 +208,12 @@ if (args.includes('capabilities')) {
   }, 5)
   process.stdin.resume()
   process.stdin.on('end', () => { clearInterval(timer); process.exit(0) })
-} else if (args.includes('reply')) {
+} else if (args.includes('+messages-reply')) {
   let input = ''
   process.stdin.setEncoding('utf8')
   process.stdin.on('data', (chunk) => { input += chunk })
   process.stdin.on('end', () => {
-    const value = JSON.parse(input)
+    const value = args.includes('binding') ? JSON.parse(input) : { conversationId: args[args.indexOf('--group') + 1], idempotencyKey: args[args.indexOf('--idempotency-key') + 1] }
     fs.writeFileSync(file('reply-started'), '')
     const timer = setInterval(() => {
       if (!fs.existsSync(file('finish-reply'))) return
@@ -312,14 +312,14 @@ if (args.includes('--local-lease')) {
   process.on('SIGTERM', () => process.exit(0))
   return
 }
-const operation = args.includes('binding') ? 'binding' : args.includes('capabilities') ? 'capabilities' : args.includes('reply') ? 'reply' : args.includes('operator-private') ? 'operator-private' : args.includes('consume') ? 'consume' : 'unknown'
+const operation = args.includes('binding') ? 'binding' : args.includes('capabilities') ? 'capabilities' : args.includes('+messages-reply') ? 'reply' : args.includes('+messages-send') ? 'operator-private' : args.includes('consume') ? 'consume' : 'unknown'
 fs.appendFileSync(record, JSON.stringify({ operation, args, credentialEnvKeys: Object.keys(process.env).filter((key) => /TOKEN|AUTH_?CODE|CLIENT_?SECRET|PASSWORD|CREDENTIAL/i.test(key)) }) + '\\n')
 if (args.includes('send-a2ui-card') || args.includes('update-a2ui-card')) {
   process.stdout.write(JSON.stringify({ ok: true, data: { bizId: 'host-card' } }))
   process.exit(0)
 }
 if (operation === 'capabilities') {
-  process.stdout.write(JSON.stringify({ ok: true, outcome: 'success', data: { schemaVersion: 1, protocolVersion: 1, auditMode: 'local_required', capabilities: { eventConsume: true, replyStdin: true, operatorPrivateStdin: true } }, meta: {} }))
+  process.stdout.write(JSON.stringify({ ok: true, outcome: 'success', data: { schemaVersion: 1, protocolVersion: 1, auditMode: 'local_required', capabilities: { eventConsume: true, chatDelivery: true } }, meta: {} }))
   process.exit(0)
 }
 
@@ -362,7 +362,7 @@ if (operation === 'consume') {
   process.stdin.setEncoding('utf8')
   process.stdin.on('data', (chunk) => { input += chunk })
   process.stdin.on('end', () => {
-    const value = input ? JSON.parse(input) : {}
+    const value = operation === 'binding' ? JSON.parse(input) : { conversationId: operation === 'reply' ? args[args.indexOf('--group') + 1] : 'operator-conversation', idempotencyKey: args[args.indexOf('--idempotency-key') + 1] }
     if (operation === 'binding') {
       process.stdout.write(JSON.stringify({ ok: true, outcome: 'success', data: { agentUuid: value.agentUuid, dwsProfile: args[args.indexOf('--profile') + 1], bindingRevision: value.bindingRevision, channel: 'dsh', bindingState: 'bound', desiredState: 'running' } }))
       return
@@ -380,7 +380,7 @@ async function createRetryFakeDws(root) {
 const fs = require('node:fs')
 const args = process.argv.slice(2)
 if (args.includes('capabilities')) {
-  process.stdout.write(JSON.stringify({ ok: true, outcome: 'success', data: { schemaVersion: 1, protocolVersion: 1, auditMode: 'local_required', capabilities: { eventConsume: true, replyStdin: true, operatorPrivateStdin: true } }, meta: {} }))
+  process.stdout.write(JSON.stringify({ ok: true, outcome: 'success', data: { schemaVersion: 1, protocolVersion: 1, auditMode: 'local_required', capabilities: { eventConsume: true, chatDelivery: true } }, meta: {} }))
   process.exit(0)
 }
 if (args.includes('consume')) {
@@ -407,7 +407,7 @@ async function createAuditFailFakeDws(root) {
   const source = `#!/usr/bin/env node
 const args = process.argv.slice(2)
 if (args.includes('capabilities')) {
-  process.stdout.write(JSON.stringify({ ok: true, outcome: 'success', data: { schemaVersion: 1, protocolVersion: 1, auditMode: 'local_required', capabilities: { eventConsume: true, replyStdin: true, operatorPrivateStdin: true } }, meta: {} }))
+  process.stdout.write(JSON.stringify({ ok: true, outcome: 'success', data: { schemaVersion: 1, protocolVersion: 1, auditMode: 'local_required', capabilities: { eventConsume: true, chatDelivery: true } }, meta: {} }))
   process.exit(0)
 }
 
@@ -434,7 +434,7 @@ const isAlive = (pid) => {
   try { process.kill(pid, 0); return true } catch { return false }
 }
 if (args.includes('capabilities')) {
-  process.stdout.write(JSON.stringify({ ok: true, outcome: 'success', data: { schemaVersion: 1, protocolVersion: 1, auditMode: 'local_required', capabilities: { eventConsume: true, replyStdin: true, operatorPrivateStdin: true } }, meta: {} }))
+  process.stdout.write(JSON.stringify({ ok: true, outcome: 'success', data: { schemaVersion: 1, protocolVersion: 1, auditMode: 'local_required', capabilities: { eventConsume: true, chatDelivery: true } }, meta: {} }))
   process.exit(0)
 }
 if (args.includes('consume')) {
@@ -803,15 +803,25 @@ test('fake DWS 验证 ready、半行/坏包隔离、白名单、去重、自回�
   assert.equal(records.filter((item) => item.operation === 'reply').length, 1)
   const reply = records.find((item) => item.operation === 'reply')
   assert.deepEqual(reply.args.slice(2), [
-    'dingtalk-tag',
-    'channel',
-    'reply',
-    '--channel',
-    'dsh',
-    '--stdin',
+    'chat',
+    '+messages-reply',
+    '--group',
+    'allowed-group',
+    '--message-id',
+    'message-allowed',
+    '--content',
+    '-',
+    '--body-stdin',
+    '--wait-delivery',
+    '--employee-context',
+    JSON.stringify({ agentUuid: employee.agentUuid, channel: 'dsh', bindingRevision: 0 }),
+    '--idempotency-key',
+    reply.args[reply.args.indexOf('--idempotency-key') + 1],
+    '--yes',
     '--format',
     'json',
   ])
+  assert.match(reply.args[reply.args.indexOf('--idempotency-key') + 1], /^[a-f0-9]{64}$/)
 
   if (process.platform !== 'win32') {
     assert.equal((await stat(stateDir)).mode & 0o777, 0o700)

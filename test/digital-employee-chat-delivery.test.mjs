@@ -29,9 +29,46 @@ function sink(options = {}) {
   })
 }
 
-for (const modern of [false, true]) {
-  test(`能力协商选择 ${modern ? 'chat' : '兼容 channel'}，正文仅经 stdin 且失败不切换重发`, async (t) => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'employee-chat-'))
+test('仅声明 chatDelivery 即可接入，正文仅经 stdin 且失败不切换重发', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'employee-chat-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const trace = path.join(root, 'calls.jsonl')
+  const script = path.join(root, 'dws.cjs')
+  await writeFile(
+    script,
+    `
+const fs = require('node:fs'); const args = process.argv.slice(2);
+let body = ''; process.stdin.setEncoding('utf8'); process.stdin.on('data', c => body += c);
+process.stdin.on('end', () => {
+ fs.appendFileSync(${JSON.stringify(trace)}, JSON.stringify({args, body}) + '\\n');
+ if (args.includes('capabilities')) { console.log(JSON.stringify({ok:true,outcome:'success',data:{schemaVersion:1,protocolVersion:1,auditMode:'local_required',capabilities:{eventConsume:true,chatDelivery:true}}})); return; }
+ if (body.includes('FAIL_ONCE')) { process.exitCode=1; return; }
+ const value = {conversationId:args.includes('+messages-reply') ? args[args.indexOf('--group')+1] : 'operator-chat',idempotencyKey:args[args.indexOf('--idempotency-key')+1]};
+ const receipt = {openMessageId:'sent',conversationId:value.conversationId || 'operator-chat',deliveryStatus:'delivered',idempotencyKey:value.idempotencyKey};
+ console.log(JSON.stringify(receipt));
+});
+`,
+  )
+  const client = sink({ dwsCommand: process.execPath, dwsArgsPrefix: [script] })
+  await client.probe()
+  await client.reply(event, 'session', '回复正文只允许 stdin')
+  await client.operatorPrivate('审批正文只允许 stdin', 'approval')
+  await assert.rejects(client.reply(event, 'session', 'FAIL_ONCE'), /dws_exit/)
+  const calls = (await readFile(trace, 'utf8')).trim().split('\n').map(JSON.parse)
+  assert.equal(calls.length, 4, '失败后不得回退旧协议重发')
+  for (const call of calls.slice(1)) assert.ok(!call.args.some((a) => /正文|FAIL_ONCE/.test(a)))
+  assert.ok(calls[1].args.includes('+messages-reply'))
+  assert.ok(calls[2].args.includes('+messages-send'))
+  assert.ok(calls[1].args.includes('--yes'))
+  assert.equal(calls[1].body, '回复正文只允许 stdin')
+  const metadata = JSON.parse(calls[1].args[calls[1].args.indexOf('--employee-context') + 1])
+  assert.deepEqual(metadata, { agentUuid: employee.agentUuid, channel: 'dsh', bindingRevision: 7 })
+  assert.equal(calls[2].args[calls[2].args.indexOf('--open-dingtalk-id') + 1], employee.operatorOpenDingTalkId)
+})
+
+for (const chatDelivery of [undefined, false]) {
+  test(`缺少 chatDelivery=true 拒绝启动并提示升级 (${chatDelivery})`, async (t) => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'employee-old-dws-'))
     t.after(() => rm(root, { recursive: true, force: true }))
     const trace = path.join(root, 'calls.jsonl')
     const script = path.join(root, 'dws.cjs')
@@ -39,37 +76,28 @@ for (const modern of [false, true]) {
       script,
       `
 const fs = require('node:fs'); const args = process.argv.slice(2);
-let body = ''; process.stdin.setEncoding('utf8'); process.stdin.on('data', c => body += c);
-process.stdin.on('end', () => {
- fs.appendFileSync(${JSON.stringify(trace)}, JSON.stringify({args, body}) + '\\n');
- if (args.includes('capabilities')) { console.log(JSON.stringify({ok:true,outcome:'success',data:{schemaVersion:1,protocolVersion:1,auditMode:'local_required',capabilities:{eventConsume:true,replyStdin:true,operatorPrivateStdin:true,chatDelivery:${modern}}}})); return; }
- if (body.includes('FAIL_ONCE')) { process.exitCode=1; return; }
- const value = ${modern} ? {conversationId:args.includes('+messages-reply') ? args[args.indexOf('--group')+1] : 'operator-chat',idempotencyKey:args[args.indexOf('--idempotency-key')+1]} : JSON.parse(body);
- const receipt = {openMessageId:'sent',conversationId:value.conversationId || 'operator-chat',deliveryStatus:'delivered',idempotencyKey:value.idempotencyKey};
- console.log(JSON.stringify(${modern} ? receipt : {ok:true,outcome:'success',data:receipt}));
-});
+fs.appendFileSync(${JSON.stringify(trace)}, JSON.stringify(args) + '\\n');
+console.log(JSON.stringify({ok:true,outcome:'success',data:{schemaVersion:1,protocolVersion:1,auditMode:'local_required',capabilities:${JSON.stringify({ eventConsume: true, replyStdin: true, operatorPrivateStdin: true, ...(chatDelivery === undefined ? {} : { chatDelivery }) })}}}));
 `,
     )
-    const client = sink({ dwsCommand: process.execPath, dwsArgsPrefix: [script] })
-    await client.probe()
-    await client.reply(event, 'session', '回复正文只允许 stdin')
-    await client.operatorPrivate('审批正文只允许 stdin', 'approval')
-    await assert.rejects(client.reply(event, 'session', 'FAIL_ONCE'), /dws_exit/)
+    const failures = []
+    let audits = 0
+    const client = sink({
+      dwsCommand: process.execPath,
+      dwsArgsPrefix: [script],
+      onFailure: (code) => failures.push(code),
+      auditSink: {
+        async audit() {
+          audits++
+        },
+      },
+    })
+    await assert.rejects(client.probe(), /请升级 DWS.*chatDelivery=true/)
+    assert.deepEqual(failures, ['incompatible_dws_capabilities'])
+    assert.equal(audits, 0)
     const calls = (await readFile(trace, 'utf8')).trim().split('\n').map(JSON.parse)
-    assert.equal(calls.length, 4, '失败后不得回退旧协议重发')
-    for (const call of calls.slice(1)) assert.ok(!call.args.some((a) => /正文|FAIL_ONCE/.test(a)))
-    if (modern) {
-      assert.ok(calls[1].args.includes('+messages-reply'))
-      assert.ok(calls[2].args.includes('+messages-send'))
-      assert.ok(calls[1].args.includes('--yes'))
-      assert.equal(calls[1].body, '回复正文只允许 stdin')
-      const metadata = JSON.parse(calls[1].args[calls[1].args.indexOf('--employee-context') + 1])
-      assert.deepEqual(metadata, { agentUuid: employee.agentUuid, channel: 'dsh', bindingRevision: 7 })
-      assert.equal(calls[2].args[calls[2].args.indexOf('--open-dingtalk-id') + 1], employee.operatorOpenDingTalkId)
-    } else {
-      assert.ok(calls[1].args.includes('reply'))
-      assert.ok(calls[2].args.includes('operator-private'))
-    }
+    assert.equal(calls.length, 1)
+    assert.ok(calls[0].includes('capabilities'), '旧 DWS 不得进入发送或回退路径')
   })
 }
 

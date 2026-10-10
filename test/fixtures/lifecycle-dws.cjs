@@ -28,7 +28,7 @@ if (args.includes('--local-lease')) {
     schemaVersion: 1,
     protocolVersion: 1,
     auditMode: 'local_required',
-    capabilities: { eventConsume: true, replyStdin: true, operatorPrivateStdin: true },
+    capabilities: { eventConsume: true, chatDelivery: true },
   })
 } else if (args.includes('consume')) {
   fs.writeFileSync(file('consumer-active'), String(process.pid), { flag: 'wx' })
@@ -55,10 +55,15 @@ if (args.includes('--local-lease')) {
   let input = ''
   process.stdin.on('data', (chunk) => (input += chunk))
   process.stdin.on('end', () => {
-    const value = JSON.parse(input)
+    const value = args.includes('binding')
+      ? JSON.parse(input)
+      : {
+          conversationId: args[args.indexOf('--group') + 1],
+          idempotencyKey: args[args.indexOf('--idempotency-key') + 1],
+        }
     if (args.includes('binding')) {
       envelope({ ...value, dwsProfile: profile, channel: 'dsh', bindingState: 'bound', desiredState: 'running' })
-    } else if (args.includes('reply')) {
+    } else if (args.includes('+messages-reply')) {
       fs.writeFileSync(file('reply-active'), String(process.pid), { flag: 'wx' })
       record('reply-started')
       // 下行保持在等待态，直到父测试开始卸载并显式释放；不依赖短暂的 300ms 重叠窗口。
