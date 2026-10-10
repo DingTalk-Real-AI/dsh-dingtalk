@@ -44,7 +44,7 @@ release 在上述停止完成后删除目标注册配置；普通 stop 保留配
 dsh-dingtalk digital-employee unregister --agent-uuid <uuid> --json --yes
 ```
 
-注册后运行交互式 `setup`，选择“管理数字员工 operator 与白名单”。新员工默认只有 operator 可私聊，额外私聊白名单和群白名单均为空。配置只保存稳定身份和 Profile selector，不保存 DWS 凭据。
+注册后运行交互式 `setup`，选择“管理数字员工 operator 与白名单”。通过 DWS manage/connect 管理的 local_agent 使用 DEAP 已发布可见范围，额外私聊白名单和群白名单不参与授权；其他本地场景默认只有 operator 可私聊。配置只保存稳定身份和 Profile selector，不保存 DWS 凭据。
 
 ## DWS/DSH 协议
 
@@ -80,13 +80,14 @@ DSH 同时排空 stdout/stderr，只有 ready 行匹配 `^\[event\] ready(?:\s|$
 }
 ```
 
-回复和 operator 私聊固定调用 `dingtalk-tag channel reply/operator-private --stdin --format json`，并要求 DWS envelope `ok=true`，业务结果从 `data` 读取。正文不会进入 argv、环境变量、配置、日志、运行状态或测试快照。回复结果必须回传 `openMessageId`、`conversationId`、`deliveryStatus` 和原幂等键。`deliveryStatus: unknown` 不自动重发，避免重复消息。
+启动探测必须满足 `capabilities.chatDelivery=true`，缺少时拒绝启动并提示升级 DWS。回复使用 `chat +messages-reply`，主管私聊使用 `chat +messages-send --open-dingtalk-id <固定主管>`；正文参数为 `-`，配合 `--body-stdin --wait-delivery --employee-context <绑定 JSON>`。绑定上下文包含 agentUuid、channel、bindingRevision，DWS 在发送前重新核对 bound/running 状态和固定主管。connect 已授权的宿主传 `--yes`，chat 自身的确认规则保持生效。`dingtalk-tag channel reply` 和 `channel operator-private` 已删除，双方须配套升级。chat 支持当前直接回执与成功 envelope。发送失败或状态未知均不切换入口重发。`--allowed-users` 控制入站触发权限，不能代替固定主管。正文不会进入 argv、环境变量、配置、日志、运行状态或测试快照。回复结果必须回传 `openMessageId`、`conversationId`、`deliveryStatus` 和原幂等键。`deliveryStatus: unknown` 不自动重发，避免重复消息。
 
 审计由 DSH 按员工写入本地 JSONL，目录 `0700`、文件 `0600` 并加锁；只包含事件、Session、操作类型、工具名、状态、时间、回复消息 ID 和 trace ID 等元数据，不含消息正文。本地审计不可写时不开始新任务；未来远程转发只能是可选 best-effort 扩展。
 
 ## 本地运行与隔离
 
-- 单聊只接受 operator 或 `allowedDirectSenders`；群聊只接受 `allowedGroups`。
+- 支持 `visibilityAccess` 的 DWS 通过 `channel binding` 为每条消息返回访问判定：local_agent 的私聊、群聊均按 DEAP 已发布成员/部门/本企业全员范围校验，不叠加本地白名单。变更 set-visibility 草稿后须 publish；撤销后下一条消息重新查询。查询失败、身份不符或协议格式错误时拒绝处理，不回退白名单，且不写入事件去重记录。
+- 其他本地场景单聊接受 operator 或 `allowedDirectSenders`，群聊接受 `allowedGroups`；旧 DWS 未声明此能力时保留旧行为，启用新策略须同时升级 DWS。旧服务端绑定需用原管理账号执行 `connect restart` 固定查询 Profile。
 - 未授权消息静默丢弃，只上报无正文的拒绝审计。
 - 敏感操作优先通过 operator 私聊的 A2UI 卡片审批；能力不可用时使用 operator 私聊一次性确认码。白名单普通成员不能批准。
 - 会话键包含 `agentUuid + conversationId`；`chat-sender` 还包含发送者身份。
@@ -114,3 +115,7 @@ DSH 同时排空 stdout/stderr，只有 ready 行匹配 `^\[event\] ready(?:\s|$
 联合验收使用固定 DSH/DWS/DEAP SHA，依次覆盖机器人无 DWS 基线、一次 connect、四类白名单消息、唯一 Session/回复/审计、重启恢复、双员工隔离和故障注入。完整步骤见 [验收清单](acceptance-checklist.md)。
 
 业务 ack/replay/cursor 未完成前只能声明“可用 MVP”，不能承诺 exactly-once 或不丢消息。A2UI 审批／提问的能力要求、降级条件与局限见 [交互说明](a2ui-interactions.md)。普通回复的 AI Card、图片、文件、语音和无 DWS 运行模式仍后置。
+
+## 本地联合验收
+
+构建 DWS 后，设置 `DWS_JOINT_BINARY` 为其绝对路径，运行 `node --test test/digital-employee-chat-delivery.test.mjs`。测试使用真实 DWS 子进程、隔离绑定目录与本机受控 MCP，验证回复、主管私聊、未知回执及绑定/会话校验；不发送真实钉钉消息。未设置该变量时，常规测试只执行新旧能力协商与失败不重发的模拟用例。

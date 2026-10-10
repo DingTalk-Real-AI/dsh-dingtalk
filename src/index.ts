@@ -355,20 +355,19 @@ async function startDigitalEmployee(
     },
     compose: async () => {
       const presets = (ctx as any).get?.('agentPresets') as HostAgentPresets | undefined
-      if (!presets)
-        return { setup: async (agentCtx: HostAgentContext, agent: HostAgent) => installInteractions(agentCtx, agent) }
+      // 宿主 setup 可能只传上下文；审批必须在 onAgentMessage 拿到真实 Agent 后安装。
+      if (!presets) return {}
       try {
         const resolved = await presets.resolve(undefined)
         return {
           agentPreset: resolved.id,
-          setup: async (agentCtx: HostAgentContext, agent: HostAgent) => {
+          setup: async (agentCtx: HostAgentContext) => {
             await presets.mount(agentCtx, resolved.id)
-            installInteractions(agentCtx, agent)
           },
         }
       } catch (error) {
         log(`preset compose failed (${error instanceof Error ? error.message : error})`)
-        return { setup: async (agentCtx: HostAgentContext, agent: HostAgent) => installInteractions(agentCtx, agent) }
+        return {}
       }
     },
   })

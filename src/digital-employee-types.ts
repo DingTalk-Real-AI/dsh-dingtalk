@@ -6,6 +6,7 @@ export interface DigitalEmployeeEvent {
   messageId: string
   conversationId: string
   conversationType: 'direct' | 'group'
+  isMention?: boolean
   senderOpenDingTalkId: string
   senderName: string
   text: string

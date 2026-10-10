@@ -147,6 +147,11 @@ test('默认配置优先 A2UI；text 是显式回滚值', () => {
   assert.equal(Config({ interactionMode: 'text' }).interactionMode, 'text')
 })
 
+test('机器能力探测禁用 CLI 联网更新检查', { skip: process.platform === 'win32' }, async (t) => {
+  const h = await harness(t, 'require-no-update-check')
+  assert.equal(await h.adapter.prepare(), true)
+})
+
 test(
   '能力缺失在发卡前降级，真实 Cordis 链中审批和 ask 均不落入 Web',
   { skip: process.platform === 'win32' },

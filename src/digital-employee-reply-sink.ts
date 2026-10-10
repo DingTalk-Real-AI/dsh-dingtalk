@@ -13,8 +13,9 @@ interface DwsCapabilities {
   auditMode: 'local_required'
   capabilities: {
     eventConsume: true
-    replyStdin: true
-    operatorPrivateStdin: true
+    chatDelivery: true
+    visibilityAccess?: boolean
+    groupMembershipAccess?: boolean
   }
 }
 
@@ -59,6 +60,8 @@ function idempotencyKey(employee: DigitalEmployeeConfig, event: DigitalEmployeeE
 
 /** DWS 的安全 stdin 回复、operator 私聊、审计与能力探测客户端。 */
 export class DwsDigitalEmployeeReplySink implements DigitalEmployeeControlSink {
+  private useVisibilityAccess = false
+  private useGroupMembershipAccess = false
   private readonly activeCalls = new Set<Promise<unknown>>()
   private readonly pendingReplies = new Map<string, Set<Promise<unknown>>>()
 
@@ -76,29 +79,25 @@ export class DwsDigitalEmployeeReplySink implements DigitalEmployeeControlSink {
       [
         '--profile',
         this.options.employee.dwsProfile,
-        'dingtalk-tag',
-        'channel',
-        'reply',
-        '--channel',
-        'dsh',
-        '--stdin',
+        'chat',
+        '+messages-reply',
+        '--group',
+        event.conversationId,
+        '--message-id',
+        event.messageId,
+        '--content',
+        '-',
+        '--body-stdin',
+        '--wait-delivery',
+        '--employee-context',
+        this.employeeContext(),
+        '--idempotency-key',
+        key,
+        '--yes',
         '--format',
         'json',
       ],
-      {
-        schemaVersion: 1,
-        protocolVersion: 1,
-        agentUuid: this.options.employee.agentUuid,
-        ...(this.options.employee.bindingRevision === undefined
-          ? {}
-          : { bindingRevision: this.options.employee.bindingRevision }),
-        eventId: event.eventId,
-        sessionId,
-        conversationId: event.conversationId,
-        referenceMessageId: event.messageId,
-        text,
-        idempotencyKey: key,
-      },
+      text,
     )
     this.trackPendingReply(event.conversationId, delivery)
     try {
@@ -143,26 +142,25 @@ export class DwsDigitalEmployeeReplySink implements DigitalEmployeeControlSink {
         [
           '--profile',
           this.options.employee.dwsProfile,
-          'dingtalk-tag',
-          'channel',
-          'operator-private',
-          '--channel',
-          'dsh',
-          '--stdin',
+          'chat',
+          '+messages-send',
+          '--open-dingtalk-id',
+          this.options.employee.operatorOpenDingTalkId,
+          '--markdown',
+          '-',
+          '--title',
+          '数字员工审批',
+          '--body-stdin',
+          '--wait-delivery',
+          '--employee-context',
+          this.employeeContext(),
+          '--idempotency-key',
+          key,
+          '--yes',
           '--format',
           'json',
         ],
-        {
-          schemaVersion: 1,
-          protocolVersion: 1,
-          agentUuid: this.options.employee.agentUuid,
-          ...(this.options.employee.bindingRevision === undefined
-            ? {}
-            : { bindingRevision: this.options.employee.bindingRevision }),
-          operatorOpenDingTalkId: this.options.employee.operatorOpenDingTalkId,
-          text,
-          idempotencyKey: key,
-        },
+        text,
       )
     } catch (error) {
       this.options.onFailure('operator_private_failed')
@@ -218,13 +216,24 @@ export class DwsDigitalEmployeeReplySink implements DigitalEmployeeControlSink {
       result.protocolVersion !== 1 ||
       result.auditMode !== 'local_required' ||
       capabilities?.eventConsume !== true ||
-      capabilities.replyStdin !== true ||
-      capabilities.operatorPrivateStdin !== true
+      capabilities.chatDelivery !== true
     ) {
       this.options.onFailure('incompatible_dws_capabilities')
-      throw new Error('incompatible_dws_capabilities')
+      throw new Error('incompatible_dws_capabilities: 请升级 DWS，数字员工要求 chatDelivery=true')
     }
+    this.useVisibilityAccess = capabilities.visibilityAccess === true
+    this.useGroupMembershipAccess = capabilities.groupMembershipAccess === true
     await this.audit({ operationType: 'runtime_start', status: 'ready' })
+  }
+
+  // 这是 connect 已授权自动回传的绑定约束；主管不能从普通用户白名单推断。
+  private employeeContext(): string {
+    const employee = this.options.employee
+    return JSON.stringify({
+      agentUuid: employee.agentUuid,
+      channel: 'dsh',
+      bindingRevision: employee.bindingRevision ?? 0,
+    })
   }
 
   async waitForPendingReplies(conversationId: string): Promise<void> {
@@ -232,7 +241,7 @@ export class DwsDigitalEmployeeReplySink implements DigitalEmployeeControlSink {
     if (pending.length) await Promise.allSettled(pending)
   }
 
-  async verifyBinding(): Promise<void> {
+  private async queryBinding(event?: DigitalEmployeeEvent): Promise<Record<string, unknown>> {
     const employee = this.options.employee
     const result = (await this.execJson(
       [
@@ -247,7 +256,12 @@ export class DwsDigitalEmployeeReplySink implements DigitalEmployeeControlSink {
         '--format',
         'json',
       ],
-      { agentUuid: employee.agentUuid, bindingRevision: employee.bindingRevision ?? 0 },
+      {
+        agentUuid: employee.agentUuid,
+        bindingRevision: employee.bindingRevision ?? 0,
+        ...(event ? { senderOpenDingTalkId: event.senderOpenDingTalkId, senderName: event.senderName } : {}),
+        ...(event && this.useGroupMembershipAccess ? { conversationType: event.conversationType } : {}),
+      },
     )) as Record<string, unknown>
     if (
       result.agentUuid !== employee.agentUuid ||
@@ -258,6 +272,25 @@ export class DwsDigitalEmployeeReplySink implements DigitalEmployeeControlSink {
       result.desiredState !== 'running'
     )
       throw new Error('binding_not_authorized')
+    return result
+  }
+
+  async verifyBinding(): Promise<void> {
+    await this.queryBinding()
+  }
+
+  requiresGroupMention(): boolean {
+    return this.useGroupMembershipAccess
+  }
+
+  async visibilityAccess(event: DigitalEmployeeEvent): Promise<boolean | undefined> {
+    if (!this.useVisibilityAccess) return undefined
+    const result = await this.queryBinding(event)
+    if (result.accessPolicy === 'local_allowlist') return undefined
+    if (result.accessPolicy !== 'deap_visibility' || typeof result.allowed !== 'boolean') {
+      throw new Error('invalid_visibility_access')
+    }
+    return result.allowed
   }
 
   private trackPendingReply(conversationId: string, delivery: Promise<unknown>): void {
@@ -311,6 +344,17 @@ export class DwsDigitalEmployeeReplySink implements DigitalEmployeeControlSink {
         }
         try {
           const envelope = JSON.parse(stdout) as Record<string, unknown>
+          // chat 仍使用其当前输出契约；两个通用 chat 发送入口接受直接回执。
+          if (
+            args.includes('--wait-delivery') &&
+            (args.includes('+messages-reply') || args.includes('+messages-send')) &&
+            !('ok' in envelope) &&
+            !('error' in envelope) &&
+            typeof envelope.openMessageId === 'string'
+          ) {
+            resolve(envelope)
+            return
+          }
           if (envelope.ok !== true || envelope.outcome !== 'success' || !('data' in envelope)) {
             reject(new Error('invalid_dws_envelope'))
             return
@@ -321,6 +365,7 @@ export class DwsDigitalEmployeeReplySink implements DigitalEmployeeControlSink {
         }
       })
       if (input === undefined) child.stdin.end()
+      else if (typeof input === 'string') child.stdin.end(input)
       else child.stdin.end(`${JSON.stringify(input)}\n`)
     })
   }

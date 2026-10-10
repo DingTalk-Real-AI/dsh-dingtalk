@@ -58,7 +58,7 @@ function parseEvent(value: unknown): DigitalEmployeeEvent {
   const conversationType =
     eventType === 'user_im_message_receive_o2o_all'
       ? 'direct'
-      : eventType === 'user_im_message_receive_group_all'
+      : eventType === 'user_im_message_receive_group_all' || eventType === 'user_im_message_receive_at'
         ? 'group'
         : undefined
   if (!conversationType) throw new Error('invalid_event_type')
@@ -70,6 +70,7 @@ function parseEvent(value: unknown): DigitalEmployeeEvent {
     messageId: safeId(raw.message_id, 'message_id'),
     conversationId: safeId(raw.conversation_id, 'conversation_id'),
     conversationType,
+    isMention: eventType === 'user_im_message_receive_at',
     senderOpenDingTalkId: safeId(raw.sender_open_dingtalk_id, 'sender'),
     senderName: typeof raw.sender === 'string' ? raw.sender.slice(0, 128) : '',
     text: raw.content,
@@ -326,7 +327,7 @@ export class DwsDigitalEmployeeSource implements InboundSource {
   private subscriptionTopics(): string[] {
     return [
       'user_im_message_receive_o2o_all',
-      'user_im_message_receive_group_all',
+      this.replySink.requiresGroupMention() ? 'user_im_message_receive_at' : 'user_im_message_receive_group_all',
       ...(this.options.onCardAction && !this.cardsDisabled ? ['user_card_action_triggered'] : []),
     ]
   }
@@ -356,8 +357,16 @@ export class DwsDigitalEmployeeSource implements InboundSource {
 
   private async handleEvent(event: DigitalEmployeeEvent): Promise<void> {
     if (this.stopped) return
+    if (event.conversationType === 'group' && this.replySink.requiresGroupMention() && !event.isMention) return
     if (this.ledger.hasEvent(event.eventId) || this.ledger.hasSentMessage(event.messageId)) return
-    const allowed = authorizeDigitalEmployeeEvent(this.options.employee, event)
+    let visibility: boolean | undefined
+    try {
+      visibility = await this.replySink.visibilityAccess(event)
+    } catch {
+      await this.replySink.audit({ eventId: event.eventId, operationType: 'access_check', status: 'unavailable' })
+      throw new Error('visibility_access_unavailable')
+    }
+    const allowed = visibility ?? authorizeDigitalEmployeeEvent(this.options.employee, event)
     if (!allowed) {
       await this.replySink.audit({ eventId: event.eventId, operationType: 'access_check', status: 'denied' })
       this.ledger.markEvent(event.eventId)

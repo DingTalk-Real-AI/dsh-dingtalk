@@ -4,6 +4,12 @@
 
 ## Unreleased
 
+- 数字员工发送仅使用通用 chat，删除旧 channel 发送回退；启动要求 DWS `chatDelivery=true`，旧版本明确提示升级。
+
+- 数字员工协商 DWS 的 `visibilityAccess` 能力，local_agent 的私聊权限按 DEAP 已发布可见范围判断；协商 `groupMembershipAccess` 后向 DWS 传递群上下文，已入群即可群聊，不叠加个人可见范围；只订阅原生 @ 当前员工的群消息，普通群消息不进入模型；查询失败不回退本地白名单、不消费事件。其他场景保留原白名单，operator 审批边界保持独立。
+
+- 修复数字员工在仅向 setup 传入上下文的 DSH 宿主上，审批和问答被网页端接管的问题；在提交消息前用真实 Agent 安装交互处理器，并禁用 A2UI 机器探测中的 CLI 联网更新检查，为首次 Schema 缓存组装保留 30 秒探测预算。
+
 - 新增机器人单聊文件接收：下载到当前会话工作区并提供模型可读路径；新增 `send_file` / `send_image` 工具，将工作区文件或图片回传原单聊或群聊，限制 20 MB、路径范围及官方格式，失败或结果未知时不自动重发（#18）。
 - 优化 A2UI 卡片的 Markdown 标题、说明与分组；审批/问答结束后保留只读请求和答案回执，不再只显示一句状态文字。
 - 新增独立于数字员工的 A2UI approve / ask 通用交互模块；兼容原子卡片 `a2uiEvent.action.context` 回调，并按显式 UID 或 OpenDingTalkId 身份空间校验服务端操作人。
