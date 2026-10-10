@@ -587,7 +587,10 @@ test('上下文单参数 setup 后，文字审批由钉钉接管并可取消', {
   const outcomes = [],
     errors = []
   let webCalls = 0
+  let approvalRequested = false
   const host = createHost(async (agent, _scoped, dispatch) => {
+    if (approvalRequested) return
+    approvalRequested = true
     const controller = new AbortController()
     try {
       const answer = dispatch(

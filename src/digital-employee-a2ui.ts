@@ -45,7 +45,8 @@ export function employeeA2ui(
           failed = true
           stop()
         },
-        help ? 5_000 : 35_000,
+        // 首次运行 DWS 会组装 Schema 缓存，不能按热缓存 Help 的耗时判定能力缺失。
+        help ? 30_000 : 35_000,
       )
       signal.addEventListener('abort', stop, { once: true })
       child.stdout.setEncoding('utf8')
@@ -218,7 +219,7 @@ export function employeeA2ui(
     async prepare() {
       if (closed) return false
       try {
-        const signal = AbortSignal.timeout(6_000)
+        const signal = AbortSignal.timeout(31_000)
         const [send, update, events] = await Promise.all([
           cli(['chat', 'message', 'send-a2ui-card', '--help'], signal, true),
           cli(['chat', 'message', 'update-a2ui-card', '--help'], signal, true),
