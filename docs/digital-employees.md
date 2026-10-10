@@ -80,7 +80,7 @@ DSH 同时排空 stdout/stderr，只有 ready 行匹配 `^\[event\] ready(?:\s|$
 }
 ```
 
-回复和 operator 私聊固定调用 `dingtalk-tag channel reply/operator-private --stdin --format json`，并要求 DWS envelope `ok=true`，业务结果从 `data` 读取。正文不会进入 argv、环境变量、配置、日志、运行状态或测试快照。回复结果必须回传 `openMessageId`、`conversationId`、`deliveryStatus` 和原幂等键。`deliveryStatus: unknown` 不自动重发，避免重复消息。
+启动探测发现 `capabilities.chatDelivery=true` 时，回复使用 `chat +messages-reply`，主管私聊使用 `chat +messages-send --open-dingtalk-id <固定主管>`；正文参数为 `-`，配合 `--body-stdin --wait-delivery --employee-context <绑定 JSON>`。绑定上下文包含 agentUuid、channel、bindingRevision，DWS 在发送前重新核对 bound/running 状态和固定主管。connect 已授权的宿主传 `--yes`，chat 自身的确认规则保持生效。未声明该能力的旧 DWS 继续使用 `dingtalk-tag channel reply/operator-private --stdin --format json`。兼容入口读取成功 envelope 的 `data`；新入口同时支持当前 chat 的直接回执与成功 envelope。仅在启动探测时选择协议，发送失败或状态未知均不切换入口重发。`--allowed-users` 控制入站触发权限，不能代替固定主管。正文不会进入 argv、环境变量、配置、日志、运行状态或测试快照。回复结果必须回传 `openMessageId`、`conversationId`、`deliveryStatus` 和原幂等键。`deliveryStatus: unknown` 不自动重发，避免重复消息。
 
 审计由 DSH 按员工写入本地 JSONL，目录 `0700`、文件 `0600` 并加锁；只包含事件、Session、操作类型、工具名、状态、时间、回复消息 ID 和 trace ID 等元数据，不含消息正文。本地审计不可写时不开始新任务；未来远程转发只能是可选 best-effort 扩展。
 
@@ -114,3 +114,7 @@ DSH 同时排空 stdout/stderr，只有 ready 行匹配 `^\[event\] ready(?:\s|$
 联合验收使用固定 DSH/DWS/DEAP SHA，依次覆盖机器人无 DWS 基线、一次 connect、四类白名单消息、唯一 Session/回复/审计、重启恢复、双员工隔离和故障注入。完整步骤见 [验收清单](acceptance-checklist.md)。
 
 业务 ack/replay/cursor 未完成前只能声明“可用 MVP”，不能承诺 exactly-once 或不丢消息。A2UI 审批／提问的能力要求、降级条件与局限见 [交互说明](a2ui-interactions.md)。普通回复的 AI Card、图片、文件、语音和无 DWS 运行模式仍后置。
+
+## 本地联合验收
+
+构建 DWS 后，设置 `DWS_JOINT_BINARY` 为其绝对路径，运行 `node --test test/digital-employee-chat-delivery.test.mjs`。测试使用真实 DWS 子进程、隔离绑定目录与本机受控 MCP，验证回复、主管私聊、未知回执及绑定/会话校验；不发送真实钉钉消息。未设置该变量时，常规测试只执行新旧能力协商与失败不重发的模拟用例。

@@ -15,6 +15,7 @@ interface DwsCapabilities {
     eventConsume: true
     replyStdin: true
     operatorPrivateStdin: true
+    chatDelivery?: boolean
   }
 }
 
@@ -59,6 +60,7 @@ function idempotencyKey(employee: DigitalEmployeeConfig, event: DigitalEmployeeE
 
 /** DWS 的安全 stdin 回复、operator 私聊、审计与能力探测客户端。 */
 export class DwsDigitalEmployeeReplySink implements DigitalEmployeeControlSink {
+  private useChatDelivery = false
   private readonly activeCalls = new Set<Promise<unknown>>()
   private readonly pendingReplies = new Map<string, Set<Promise<unknown>>>()
 
@@ -72,34 +74,59 @@ export class DwsDigitalEmployeeReplySink implements DigitalEmployeeControlSink {
   ): Promise<DigitalEmployeeReplyResult> {
     const key = idempotencyKey(this.options.employee, event, purpose)
     let result: unknown
-    const delivery = this.execJson(
-      [
-        '--profile',
-        this.options.employee.dwsProfile,
-        'dingtalk-tag',
-        'channel',
-        'reply',
-        '--channel',
-        'dsh',
-        '--stdin',
-        '--format',
-        'json',
-      ],
-      {
-        schemaVersion: 1,
-        protocolVersion: 1,
-        agentUuid: this.options.employee.agentUuid,
-        ...(this.options.employee.bindingRevision === undefined
-          ? {}
-          : { bindingRevision: this.options.employee.bindingRevision }),
-        eventId: event.eventId,
-        sessionId,
-        conversationId: event.conversationId,
-        referenceMessageId: event.messageId,
-        text,
-        idempotencyKey: key,
-      },
-    )
+    const delivery = this.useChatDelivery
+      ? this.execJson(
+          [
+            '--profile',
+            this.options.employee.dwsProfile,
+            'chat',
+            '+messages-reply',
+            '--group',
+            event.conversationId,
+            '--message-id',
+            event.messageId,
+            '--content',
+            '-',
+            '--body-stdin',
+            '--wait-delivery',
+            '--employee-context',
+            this.employeeContext(),
+            '--idempotency-key',
+            key,
+            '--yes',
+            '--format',
+            'json',
+          ],
+          text,
+        )
+      : this.execJson(
+          [
+            '--profile',
+            this.options.employee.dwsProfile,
+            'dingtalk-tag',
+            'channel',
+            'reply',
+            '--channel',
+            'dsh',
+            '--stdin',
+            '--format',
+            'json',
+          ],
+          {
+            schemaVersion: 1,
+            protocolVersion: 1,
+            agentUuid: this.options.employee.agentUuid,
+            ...(this.options.employee.bindingRevision === undefined
+              ? {}
+              : { bindingRevision: this.options.employee.bindingRevision }),
+            eventId: event.eventId,
+            sessionId,
+            conversationId: event.conversationId,
+            referenceMessageId: event.messageId,
+            text,
+            idempotencyKey: key,
+          },
+        )
     this.trackPendingReply(event.conversationId, delivery)
     try {
       result = await delivery
@@ -139,31 +166,56 @@ export class DwsDigitalEmployeeReplySink implements DigitalEmployeeControlSink {
       .digest('hex')
     let result: unknown
     try {
-      result = await this.execJson(
-        [
-          '--profile',
-          this.options.employee.dwsProfile,
-          'dingtalk-tag',
-          'channel',
-          'operator-private',
-          '--channel',
-          'dsh',
-          '--stdin',
-          '--format',
-          'json',
-        ],
-        {
-          schemaVersion: 1,
-          protocolVersion: 1,
-          agentUuid: this.options.employee.agentUuid,
-          ...(this.options.employee.bindingRevision === undefined
-            ? {}
-            : { bindingRevision: this.options.employee.bindingRevision }),
-          operatorOpenDingTalkId: this.options.employee.operatorOpenDingTalkId,
-          text,
-          idempotencyKey: key,
-        },
-      )
+      result = this.useChatDelivery
+        ? await this.execJson(
+            [
+              '--profile',
+              this.options.employee.dwsProfile,
+              'chat',
+              '+messages-send',
+              '--open-dingtalk-id',
+              this.options.employee.operatorOpenDingTalkId,
+              '--markdown',
+              '-',
+              '--title',
+              '数字员工审批',
+              '--body-stdin',
+              '--wait-delivery',
+              '--employee-context',
+              this.employeeContext(),
+              '--idempotency-key',
+              key,
+              '--yes',
+              '--format',
+              'json',
+            ],
+            text,
+          )
+        : await this.execJson(
+            [
+              '--profile',
+              this.options.employee.dwsProfile,
+              'dingtalk-tag',
+              'channel',
+              'operator-private',
+              '--channel',
+              'dsh',
+              '--stdin',
+              '--format',
+              'json',
+            ],
+            {
+              schemaVersion: 1,
+              protocolVersion: 1,
+              agentUuid: this.options.employee.agentUuid,
+              ...(this.options.employee.bindingRevision === undefined
+                ? {}
+                : { bindingRevision: this.options.employee.bindingRevision }),
+              operatorOpenDingTalkId: this.options.employee.operatorOpenDingTalkId,
+              text,
+              idempotencyKey: key,
+            },
+          )
     } catch (error) {
       this.options.onFailure('operator_private_failed')
       throw error
@@ -224,7 +276,18 @@ export class DwsDigitalEmployeeReplySink implements DigitalEmployeeControlSink {
       this.options.onFailure('incompatible_dws_capabilities')
       throw new Error('incompatible_dws_capabilities')
     }
+    this.useChatDelivery = capabilities.chatDelivery === true
     await this.audit({ operationType: 'runtime_start', status: 'ready' })
+  }
+
+  // 这是 connect 已授权自动回传的绑定约束；主管不能从普通用户白名单推断。
+  private employeeContext(): string {
+    const employee = this.options.employee
+    return JSON.stringify({
+      agentUuid: employee.agentUuid,
+      channel: 'dsh',
+      bindingRevision: employee.bindingRevision ?? 0,
+    })
   }
 
   async waitForPendingReplies(conversationId: string): Promise<void> {
@@ -311,6 +374,17 @@ export class DwsDigitalEmployeeReplySink implements DigitalEmployeeControlSink {
         }
         try {
           const envelope = JSON.parse(stdout) as Record<string, unknown>
+          // chat 仍使用其当前输出契约；仅协商后的两个发送入口接受直接回执。
+          if (
+            args.includes('--wait-delivery') &&
+            (args.includes('+messages-reply') || args.includes('+messages-send')) &&
+            !('ok' in envelope) &&
+            !('error' in envelope) &&
+            typeof envelope.openMessageId === 'string'
+          ) {
+            resolve(envelope)
+            return
+          }
           if (envelope.ok !== true || envelope.outcome !== 'success' || !('data' in envelope)) {
             reject(new Error('invalid_dws_envelope'))
             return
@@ -321,6 +395,7 @@ export class DwsDigitalEmployeeReplySink implements DigitalEmployeeControlSink {
         }
       })
       if (input === undefined) child.stdin.end()
+      else if (typeof input === 'string') child.stdin.end(input)
       else child.stdin.end(`${JSON.stringify(input)}\n`)
     })
   }
