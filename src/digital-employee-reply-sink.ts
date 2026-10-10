@@ -15,6 +15,7 @@ interface DwsCapabilities {
     eventConsume: true
     chatDelivery: true
     visibilityAccess?: boolean
+    groupMembershipAccess?: boolean
   }
 }
 
@@ -60,6 +61,7 @@ function idempotencyKey(employee: DigitalEmployeeConfig, event: DigitalEmployeeE
 /** DWS 的安全 stdin 回复、operator 私聊、审计与能力探测客户端。 */
 export class DwsDigitalEmployeeReplySink implements DigitalEmployeeControlSink {
   private useVisibilityAccess = false
+  private useGroupMembershipAccess = false
   private readonly activeCalls = new Set<Promise<unknown>>()
   private readonly pendingReplies = new Map<string, Set<Promise<unknown>>>()
 
@@ -220,6 +222,7 @@ export class DwsDigitalEmployeeReplySink implements DigitalEmployeeControlSink {
       throw new Error('incompatible_dws_capabilities: 请升级 DWS，数字员工要求 chatDelivery=true')
     }
     this.useVisibilityAccess = capabilities.visibilityAccess === true
+    this.useGroupMembershipAccess = capabilities.groupMembershipAccess === true
     await this.audit({ operationType: 'runtime_start', status: 'ready' })
   }
 
@@ -257,6 +260,7 @@ export class DwsDigitalEmployeeReplySink implements DigitalEmployeeControlSink {
         agentUuid: employee.agentUuid,
         bindingRevision: employee.bindingRevision ?? 0,
         ...(event ? { senderOpenDingTalkId: event.senderOpenDingTalkId, senderName: event.senderName } : {}),
+        ...(event && this.useGroupMembershipAccess ? { conversationType: event.conversationType } : {}),
       },
     )) as Record<string, unknown>
     if (

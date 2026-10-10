@@ -277,3 +277,44 @@ for (const policy of ['deap_visibility', 'local_allowlist', 'invalid']) {
     await assert.rejects(client.visibilityAccess(inbound), /binding_not_authorized/)
   })
 }
+
+for (const supported of [true, false]) {
+  test(`群访问上下文按能力协商 ${supported}`, async () => {
+    const client = sink()
+    client.execJson = async (args, input) => {
+      if (args.includes('capabilities'))
+        return {
+          schemaVersion: 1,
+          protocolVersion: 1,
+          auditMode: 'local_required',
+          capabilities: {
+            eventConsume: true,
+            chatDelivery: true,
+            visibilityAccess: true,
+            groupMembershipAccess: supported,
+          },
+        }
+      assert.equal(input.conversationType, supported ? 'group' : undefined)
+      return {
+        agentUuid: employee.agentUuid,
+        dwsProfile: employee.dwsProfile,
+        channel: 'dsh',
+        bindingRevision: 7,
+        bindingState: 'bound',
+        desiredState: 'running',
+        accessPolicy: 'deap_visibility',
+        allowed: true,
+      }
+    }
+    await client.probe()
+    assert.equal(
+      await client.visibilityAccess({
+        ...event,
+        conversationType: 'group',
+        senderOpenDingTalkId: 'group-member',
+        senderName: '成员',
+      }),
+      true,
+    )
+  })
+}

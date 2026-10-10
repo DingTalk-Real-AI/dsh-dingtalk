@@ -6,7 +6,7 @@
 
 - 数字员工发送仅使用通用 chat，删除旧 channel 发送回退；启动要求 DWS `chatDelivery=true`，旧版本明确提示升级。
 
-- 数字员工协商 DWS 的 `visibilityAccess` 能力，local_agent 的聊天权限按 DEAP 已发布可见范围判断；查询失败不回退本地白名单、不消费事件。其他场景保留原白名单，operator 审批边界保持独立。
+- 数字员工协商 DWS 的 `visibilityAccess` 能力，local_agent 的私聊权限按 DEAP 已发布可见范围判断；协商 `groupMembershipAccess` 后向 DWS 传递群上下文，已入群即可群聊，不叠加个人可见范围；查询失败不回退本地白名单、不消费事件。其他场景保留原白名单，operator 审批边界保持独立。
 
 - 修复数字员工在仅向 setup 传入上下文的 DSH 宿主上，审批和问答被网页端接管的问题；在提交消息前用真实 Agent 安装交互处理器，并禁用 A2UI 机器探测中的 CLI 联网更新检查，为首次 Schema 缓存组装保留 30 秒探测预算。
 
