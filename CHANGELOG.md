@@ -4,6 +4,8 @@
 
 ## Unreleased
 
+- 数字员工回复回执超过 DWS 的 2 秒查询预算仍未确认时，向原会话尝试发送一次带排查编号的安全故障提示；提示自身失败不递归、不重发正文，保留 fail-closed，并通过持久去重与本地审计关联排查。
+
 - 数字员工发送仅使用通用 chat，删除旧 channel 发送回退；启动要求 DWS `chatDelivery=true`，旧版本明确提示升级。
 
 - 数字员工协商 DWS 的 `visibilityAccess` 能力，local_agent 的私聊权限按 DEAP 已发布可见范围判断；协商 `groupMembershipAccess` 后向 DWS 传递群上下文，已入群即可群聊，不叠加个人可见范围；只订阅原生 @ 当前员工的群消息，普通群消息不进入模型；查询失败不回退本地白名单、不消费事件。其他场景保留原白名单，operator 审批边界保持独立。

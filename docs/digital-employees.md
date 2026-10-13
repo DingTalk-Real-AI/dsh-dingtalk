@@ -82,7 +82,15 @@ DSH 同时排空 stdout/stderr，只有 ready 行匹配 `^\[event\] ready(?:\s|$
 
 启动探测必须满足 `capabilities.chatDelivery=true`，缺少时拒绝启动并提示升级 DWS。回复使用 `chat +messages-reply`，主管私聊使用 `chat +messages-send --open-dingtalk-id <固定主管>`；正文参数为 `-`，配合 `--body-stdin --wait-delivery --employee-context <绑定 JSON>`。绑定上下文包含 agentUuid、channel、bindingRevision，DWS 在发送前重新核对 bound/running 状态和固定主管。connect 已授权的宿主传 `--yes`，chat 自身的确认规则保持生效。`dingtalk-tag channel reply` 和 `channel operator-private` 已删除，双方须配套升级。chat 支持当前直接回执与成功 envelope。发送失败或状态未知均不切换入口重发。`--allowed-users` 控制入站触发权限，不能代替固定主管。正文不会进入 argv、环境变量、配置、日志、运行状态或测试快照。回复结果必须回传 `openMessageId`、`conversationId`、`deliveryStatus` 和原幂等键。`deliveryStatus: unknown` 不自动重发，避免重复消息。
 
-审计由 DSH 按员工写入本地 JSONL，目录 `0700`、文件 `0600` 并加锁；只包含事件、Session、操作类型、工具名、状态、时间、回复消息 ID 和 trace ID 等元数据，不含消息正文。本地审计不可写时不开始新任务；未来远程转发只能是可选 best-effort 扩展。
+### 回执超时的 IM 故障提示
+
+DWS 对同一发送任务的回执最多等待 2 秒；中途恢复就正常完成，不发送故障提示。若 DWS 最终以结构化 `delivery_unknown` 错误退出，插件先将员工保持在 fail-closed 状态，再向原会话引用原消息尝试发送一次固定中文提示：送达状态未确认、原回复可能已经送达、请勿重复执行，以及错误类型和 `DE-` 开头的排查编号。不透传服务端自由文本、凭据或原回复正文；也不将未知送达描述为任务执行失败。
+
+故障提示继续使用相同 Profile、绑定校验和 `chat +messages-reply --wait-delivery`，有独立幂等键，并在发送前审计、持久化领取记录。同一事件在账本保留范围内最多尝试一次提示（与其他去重记录相同，最多保留 10,000 条），重启后也不会再次提示。绑定停止或变更、审计或账本不可写时不绕过校验。通知自身失败或送达未知只落本地记录，不递归通知、不重发原文、不恢复员工 ready，也不把原任务记为成功。正常停止会等待通知及其审计完成。
+
+提示自身也需要发送和查询回执，所以整体处理可能超过原回复的 2 秒等待预算。同一 IM 通道完全不可用时，无法保证故障提示送达；此时依靠本地日志排查。其他错误类别、取消、非结构化错误不会误触发这条回执超时通知。
+
+审计由 DSH 按员工写入本地 JSONL，目录 `0700`、文件 `0600` 并加锁；只包含事件、Session、操作类型、工具名、状态、时间、回复消息 ID、trace ID、diagnosticId 和 failureCode 等元数据，不含消息正文。本地审计不可写时不开始新任务；未来远程转发只能是可选 best-effort 扩展。
 
 ## 本地运行与隔离
 
@@ -109,6 +117,8 @@ DSH 同时排空 stdout/stderr，只有 ready 行匹配 `^\[event\] ready(?:\s|$
 - 脱敏失败码。
 
 诊断不输出 operator、白名单具体身份、凭据或聊天正文。
+
+用户反馈 IM 中的 `DE-...` 编号后，在宿主日志（DWH 通常为 `var/<employee>/logs/agent.log`）中查找 `delivery_failure_notice diagnosticId=DE-...`，并在插件状态目录下的 `digital-employees/<agentUuid>/audit/<agentUuid>.jsonl` 查相同 `diagnosticId`。`reply_delivery_unknown` 记录原回执失败，`delivery_failure_notice` 记录提示的 `claimed/delivered/unknown/failed` 结果；结合审计中的 eventId、sessionId、时间定位 DWS `logs/dws.log` 的原始业务错误。排查编号属于插件本地关联键，不是服务端 trace ID；最终 `delivery_unknown` 不一定含最后一次服务端错误码，不能据此认定一定是 `1001`。本地审计无法落盘时，宿主日志会尽力记录安全的准备或审计失败状态。
 
 ## 发布与验收边界
 

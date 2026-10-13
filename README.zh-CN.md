@@ -27,7 +27,7 @@
 
 接入必须由 DWS `dingtalk-tag connect --channel dsh` 发起，并通过 stdin 幂等调用本包的 `digital-employee register`。注册后重新运行 `setup` 管理 operator、私聊 OpenDingTalkId 和群 openConversationId 白名单。`doctor` 会按员工显示能力、ready、订阅、最近事件/回复/审计和脱敏失败码。
 
-本分支已按 DWS 的 `dingtalk-tag channel capabilities/reply/operator-private`、统一 JSON envelope、真实 snake_case Event Consume 和本地必需审计协议对齐；仍须固定 DWS/DSH/DEAP 精确 SHA 做真实组织联合验收。缺少任一能力或本地审计不可写时该员工 fail-closed，不影响机器人或其他员工。详细接口和验收边界见 [数字员工 Channel 文档](docs/digital-employees.md)。业务 ack/replay/cursor 未完成前，本能力不承诺 exactly-once 或不丢消息。
+本分支已按 DWS 的 `dingtalk-tag channel capabilities/binding` 与通用 `chat` 发送、统一 JSON envelope、真实 snake_case Event Consume 和本地必需审计协议对齐；仍须固定 DWS/DSH/DEAP 精确 SHA 做真实组织联合验收。缺少任一能力或本地审计不可写时该员工 fail-closed，不影响机器人或其他员工。详细接口和验收边界见 [数字员工 Channel 文档](docs/digital-employees.md)。回复回执最终返回 `delivery_unknown` 时，会尝试在原会话发送一次带排查编号的故障提示；提示失败不递归，员工仍保持 fail-closed。业务 ack/replay/cursor 未完成前，本能力不承诺 exactly-once 或不丢消息。
 
 ## AI Native 安装（推荐）
 

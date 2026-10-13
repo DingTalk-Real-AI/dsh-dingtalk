@@ -9,6 +9,8 @@ export interface DigitalEmployeeAuditFields {
   status: string
   replyMessageId?: string
   traceId?: string
+  diagnosticId?: string
+  failureCode?: string
 }
 
 const LOCK_RETRY_MS = 10
@@ -55,6 +57,8 @@ export class LocalDigitalEmployeeAuditLog {
         status: fields.status,
         ...(fields.replyMessageId ? { replyMessageId: fields.replyMessageId } : {}),
         ...(fields.traceId ? { traceId: fields.traceId } : {}),
+        ...(fields.diagnosticId ? { diagnosticId: fields.diagnosticId } : {}),
+        ...(fields.failureCode ? { failureCode: fields.failureCode } : {}),
       }
       const output = await open(this.file, 'a', 0o600)
       try {
