@@ -7,14 +7,52 @@ import type { DigitalEmployeeEvent, DigitalEmployeeReplyResult } from './digital
 
 const MAX_JSON_OUTPUT_BYTES = 256 * 1024
 
+class DwsCommandError extends Error {
+  constructor(
+    code: number | null,
+    readonly deliveryUnknown: boolean,
+  ) {
+    super(`dws_exit_${code ?? 'unknown'}`)
+  }
+}
+
+// 仅信任当前 DWS 的结构化分类，不保留或传播服务端自由文本。
+function isDeliveryUnknown(stderr: string): boolean {
+  try {
+    const envelope = JSON.parse(stderr)
+    const error = envelope?.error
+    return (
+      error?.code === 5 &&
+      error.category === 'internal' &&
+      error.reason === 'delivery_unknown' &&
+      error.retryable === false
+    )
+  } catch {
+    return false
+  }
+}
+
+function validReply(result: unknown, conversationId: string, key: string): result is DigitalEmployeeReplyResult {
+  if (!result || typeof result !== 'object') return false
+  const raw = result as Record<string, unknown>
+  return (
+    typeof raw.openMessageId === 'string' &&
+    raw.openMessageId.trim() !== '' &&
+    raw.conversationId === conversationId &&
+    (raw.deliveryStatus === 'delivered' || raw.deliveryStatus === 'unknown') &&
+    raw.idempotencyKey === key
+  )
+}
+
 interface DwsCapabilities {
   schemaVersion: 1
   protocolVersion: 1
   auditMode: 'local_required'
   capabilities: {
     eventConsume: true
-    replyStdin: true
-    operatorPrivateStdin: true
+    chatDelivery: true
+    visibilityAccess?: boolean
+    groupMembershipAccess?: boolean
   }
 }
 
@@ -43,6 +81,7 @@ interface DwsDigitalEmployeeReplySinkOptions {
   onFailure(code: string): void
   onReply(): void
   onAudit(): void
+  log?: (line: string) => void
 }
 
 export function sanitizedDwsEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
@@ -59,78 +98,132 @@ function idempotencyKey(employee: DigitalEmployeeConfig, event: DigitalEmployeeE
 
 /** DWS 的安全 stdin 回复、operator 私聊、审计与能力探测客户端。 */
 export class DwsDigitalEmployeeReplySink implements DigitalEmployeeControlSink {
+  private useVisibilityAccess = false
+  private useGroupMembershipAccess = false
   private readonly activeCalls = new Set<Promise<unknown>>()
   private readonly pendingReplies = new Map<string, Set<Promise<unknown>>>()
 
   constructor(private readonly options: DwsDigitalEmployeeReplySinkOptions) {}
 
-  async reply(
+  reply(
     event: DigitalEmployeeEvent,
     sessionId: string,
     text: string,
     purpose = 'reply',
   ): Promise<DigitalEmployeeReplyResult> {
+    // 等待整个处理链，避免原命令结束到通知启动之间被 drain 或后续消息越过。
+    const operation = this.trackCall(this.runReply(event, sessionId, text, purpose))
+    this.trackPendingReply(event.conversationId, operation)
+    void operation.finally(() => this.untrackPendingReply(event.conversationId, operation)).catch(() => undefined)
+    return operation
+  }
+
+  private replyArgs(event: DigitalEmployeeEvent, key: string): string[] {
+    return [
+      '--profile',
+      this.options.employee.dwsProfile,
+      'chat',
+      '+messages-reply',
+      '--group',
+      event.conversationId,
+      '--message-id',
+      event.messageId,
+      '--content',
+      '-',
+      '--body-stdin',
+      '--wait-delivery',
+      '--employee-context',
+      this.employeeContext(),
+      '--idempotency-key',
+      key,
+      '--yes',
+      '--format',
+      'json',
+    ]
+  }
+
+  private async runReply(
+    event: DigitalEmployeeEvent,
+    sessionId: string,
+    text: string,
+    purpose: string,
+  ): Promise<DigitalEmployeeReplyResult> {
     const key = idempotencyKey(this.options.employee, event, purpose)
     let result: unknown
-    const delivery = this.execJson(
-      [
-        '--profile',
-        this.options.employee.dwsProfile,
-        'dingtalk-tag',
-        'channel',
-        'reply',
-        '--channel',
-        'dsh',
-        '--stdin',
-        '--format',
-        'json',
-      ],
-      {
-        schemaVersion: 1,
-        protocolVersion: 1,
-        agentUuid: this.options.employee.agentUuid,
-        ...(this.options.employee.bindingRevision === undefined
-          ? {}
-          : { bindingRevision: this.options.employee.bindingRevision }),
-        eventId: event.eventId,
-        sessionId,
-        conversationId: event.conversationId,
-        referenceMessageId: event.messageId,
-        text,
-        idempotencyKey: key,
-      },
-    )
-    this.trackPendingReply(event.conversationId, delivery)
     try {
-      result = await delivery
+      result = await this.execJson(this.replyArgs(event, key), text)
     } catch (error) {
-      this.untrackPendingReply(event.conversationId, delivery)
       this.options.onFailure('reply_failed')
+      if (error instanceof DwsCommandError && error.deliveryUnknown) {
+        await this.notifyDeliveryUnknown(event, sessionId)
+      }
       throw error
     }
-    const raw = result as Record<string, unknown>
-    if (
-      typeof raw.openMessageId !== 'string' ||
-      raw.openMessageId.trim() === '' ||
-      raw.conversationId !== event.conversationId ||
-      (raw.deliveryStatus !== 'delivered' && raw.deliveryStatus !== 'unknown') ||
-      raw.idempotencyKey !== key
-    ) {
-      this.untrackPendingReply(event.conversationId, delivery)
+    if (!validReply(result, event.conversationId, key)) {
       this.options.onFailure('invalid_reply_result')
       throw new Error('invalid_reply_result')
     }
-    this.options.ledger.markSentMessage(raw.openMessageId)
-    this.untrackPendingReply(event.conversationId, delivery)
+    this.options.ledger.markSentMessage(result.openMessageId)
     this.options.onReply()
     await this.audit({
       eventId: event.eventId,
       sessionId,
       operationType: purpose,
-      status: raw.deliveryStatus,
-      replyMessageId: raw.openMessageId,
+      status: result.deliveryStatus,
+      replyMessageId: result.openMessageId,
     })
-    return raw as unknown as DigitalEmployeeReplyResult
+    return result
+  }
+
+  private async notifyDeliveryUnknown(event: DigitalEmployeeEvent, sessionId: string): Promise<void> {
+    const key = idempotencyKey(this.options.employee, event, 'delivery-failure-notice')
+    const diagnosticId = `DE-${key.slice(0, 16)}`
+    const fields = { eventId: event.eventId, sessionId, diagnosticId, failureCode: 'delivery_unknown' }
+    this.logFailureNotice(diagnosticId, 'original_delivery_unknown')
+    // 无审计或无持久去重时不发送；所有通知失败都保留原业务错误，不再次进入 reply。
+    try {
+      await this.audit({ ...fields, operationType: 'reply_delivery_unknown', status: 'failed' })
+      if (!this.options.ledger.claimFailureNotice(key)) {
+        this.logFailureNotice(diagnosticId, 'already_attempted')
+        return
+      }
+      await this.audit({ ...fields, operationType: 'delivery_failure_notice', status: 'claimed' })
+    } catch {
+      this.logFailureNotice(diagnosticId, 'preparation_failed')
+      return
+    }
+    const text =
+      '限定时间内（最长2秒）仍无法确认回复是否送达，数字员工已暂停后续处理。' +
+      '原回复可能已经送达，请先核对会话，请勿重复执行。' +
+      `请联系维护者，并提供错误类型 delivery_unknown 及排查编号：${diagnosticId}`
+    let status = 'failed'
+    let replyMessageId: string | undefined
+    try {
+      const result = await this.execJson(this.replyArgs(event, key), text)
+      if (validReply(result, event.conversationId, key)) {
+        this.options.ledger.markSentMessage(result.openMessageId)
+        status = result.deliveryStatus
+        replyMessageId = result.openMessageId
+      }
+    } catch (error) {
+      if (error instanceof DwsCommandError && error.deliveryUnknown) status = 'unknown'
+    }
+    this.logFailureNotice(diagnosticId, status)
+    try {
+      await this.audit({ ...fields, operationType: 'delivery_failure_notice', status, replyMessageId })
+    } catch {
+      this.logFailureNotice(diagnosticId, 'result_audit_failed')
+    }
+  }
+
+  private logFailureNotice(diagnosticId: string, status: string): void {
+    try {
+      this.options.log?.(
+        `delivery_failure_notice diagnosticId=${diagnosticId} failureCode=delivery_unknown status=${status}`,
+      )
+    } catch {
+      // 日志回调异常不能覆盖原错误，或触发额外 IM 消息。
+    }
   }
 
   async operatorPrivate(text: string, operationType: string): Promise<DigitalEmployeeReplyResult> {
@@ -143,26 +236,25 @@ export class DwsDigitalEmployeeReplySink implements DigitalEmployeeControlSink {
         [
           '--profile',
           this.options.employee.dwsProfile,
-          'dingtalk-tag',
-          'channel',
-          'operator-private',
-          '--channel',
-          'dsh',
-          '--stdin',
+          'chat',
+          '+messages-send',
+          '--open-dingtalk-id',
+          this.options.employee.operatorOpenDingTalkId,
+          '--markdown',
+          '-',
+          '--title',
+          '数字员工审批',
+          '--body-stdin',
+          '--wait-delivery',
+          '--employee-context',
+          this.employeeContext(),
+          '--idempotency-key',
+          key,
+          '--yes',
           '--format',
           'json',
         ],
-        {
-          schemaVersion: 1,
-          protocolVersion: 1,
-          agentUuid: this.options.employee.agentUuid,
-          ...(this.options.employee.bindingRevision === undefined
-            ? {}
-            : { bindingRevision: this.options.employee.bindingRevision }),
-          operatorOpenDingTalkId: this.options.employee.operatorOpenDingTalkId,
-          text,
-          idempotencyKey: key,
-        },
+        text,
       )
     } catch (error) {
       this.options.onFailure('operator_private_failed')
@@ -218,13 +310,24 @@ export class DwsDigitalEmployeeReplySink implements DigitalEmployeeControlSink {
       result.protocolVersion !== 1 ||
       result.auditMode !== 'local_required' ||
       capabilities?.eventConsume !== true ||
-      capabilities.replyStdin !== true ||
-      capabilities.operatorPrivateStdin !== true
+      capabilities.chatDelivery !== true
     ) {
       this.options.onFailure('incompatible_dws_capabilities')
-      throw new Error('incompatible_dws_capabilities')
+      throw new Error('incompatible_dws_capabilities: 请升级 DWS，数字员工要求 chatDelivery=true')
     }
+    this.useVisibilityAccess = capabilities.visibilityAccess === true
+    this.useGroupMembershipAccess = capabilities.groupMembershipAccess === true
     await this.audit({ operationType: 'runtime_start', status: 'ready' })
+  }
+
+  // 这是 connect 已授权自动回传的绑定约束；主管不能从普通用户白名单推断。
+  private employeeContext(): string {
+    const employee = this.options.employee
+    return JSON.stringify({
+      agentUuid: employee.agentUuid,
+      channel: 'dsh',
+      bindingRevision: employee.bindingRevision ?? 0,
+    })
   }
 
   async waitForPendingReplies(conversationId: string): Promise<void> {
@@ -232,7 +335,7 @@ export class DwsDigitalEmployeeReplySink implements DigitalEmployeeControlSink {
     if (pending.length) await Promise.allSettled(pending)
   }
 
-  async verifyBinding(): Promise<void> {
+  private async queryBinding(event?: DigitalEmployeeEvent): Promise<Record<string, unknown>> {
     const employee = this.options.employee
     const result = (await this.execJson(
       [
@@ -247,7 +350,12 @@ export class DwsDigitalEmployeeReplySink implements DigitalEmployeeControlSink {
         '--format',
         'json',
       ],
-      { agentUuid: employee.agentUuid, bindingRevision: employee.bindingRevision ?? 0 },
+      {
+        agentUuid: employee.agentUuid,
+        bindingRevision: employee.bindingRevision ?? 0,
+        ...(event ? { senderOpenDingTalkId: event.senderOpenDingTalkId, senderName: event.senderName } : {}),
+        ...(event && this.useGroupMembershipAccess ? { conversationType: event.conversationType } : {}),
+      },
     )) as Record<string, unknown>
     if (
       result.agentUuid !== employee.agentUuid ||
@@ -258,6 +366,25 @@ export class DwsDigitalEmployeeReplySink implements DigitalEmployeeControlSink {
       result.desiredState !== 'running'
     )
       throw new Error('binding_not_authorized')
+    return result
+  }
+
+  async verifyBinding(): Promise<void> {
+    await this.queryBinding()
+  }
+
+  requiresGroupMention(): boolean {
+    return this.useGroupMembershipAccess
+  }
+
+  async visibilityAccess(event: DigitalEmployeeEvent): Promise<boolean | undefined> {
+    if (!this.useVisibilityAccess) return undefined
+    const result = await this.queryBinding(event)
+    if (result.accessPolicy === 'local_allowlist') return undefined
+    if (result.accessPolicy !== 'deap_visibility' || typeof result.allowed !== 'boolean') {
+      throw new Error('invalid_visibility_access')
+    }
+    return result.allowed
   }
 
   private trackPendingReply(conversationId: string, delivery: Promise<unknown>): void {
@@ -278,7 +405,10 @@ export class DwsDigitalEmployeeReplySink implements DigitalEmployeeControlSink {
   }
 
   private execJson(args: string[], input?: unknown): Promise<unknown> {
-    const call = this.runJson(args, input)
+    return this.trackCall(this.runJson(args, input))
+  }
+
+  private trackCall<T>(call: Promise<T>): Promise<T> {
     this.activeCalls.add(call)
     void call.finally(() => this.activeCalls.delete(call)).catch(() => undefined)
     return call
@@ -295,6 +425,7 @@ export class DwsDigitalEmployeeReplySink implements DigitalEmployeeControlSink {
       })
       let stdout = ''
       let stderrBytes = 0
+      const stderrChunks: Buffer[] = []
       child.stdout.on('data', (chunk: Buffer) => {
         stdout += chunk.toString('utf8')
         if (Buffer.byteLength(stdout) > MAX_JSON_OUTPUT_BYTES) child.kill('SIGTERM')
@@ -302,15 +433,34 @@ export class DwsDigitalEmployeeReplySink implements DigitalEmployeeControlSink {
       child.stderr.on('data', (chunk: Buffer) => {
         stderrBytes += chunk.length
         if (stderrBytes > MAX_JSON_OUTPUT_BYTES) child.kill('SIGTERM')
+        else stderrChunks.push(chunk)
       })
       child.once('error', () => reject(new Error('dws_spawn_failed')))
       child.once('close', (code) => {
         if (code !== 0) {
-          reject(new Error(`dws_exit_${code ?? 'unknown'}`))
+          reject(
+            new DwsCommandError(
+              code,
+              code === 5 &&
+                stderrBytes <= MAX_JSON_OUTPUT_BYTES &&
+                isDeliveryUnknown(Buffer.concat(stderrChunks).toString('utf8')),
+            ),
+          )
           return
         }
         try {
           const envelope = JSON.parse(stdout) as Record<string, unknown>
+          // chat 仍使用其当前输出契约；两个通用 chat 发送入口接受直接回执。
+          if (
+            args.includes('--wait-delivery') &&
+            (args.includes('+messages-reply') || args.includes('+messages-send')) &&
+            !('ok' in envelope) &&
+            !('error' in envelope) &&
+            typeof envelope.openMessageId === 'string'
+          ) {
+            resolve(envelope)
+            return
+          }
           if (envelope.ok !== true || envelope.outcome !== 'success' || !('data' in envelope)) {
             reject(new Error('invalid_dws_envelope'))
             return
@@ -321,6 +471,7 @@ export class DwsDigitalEmployeeReplySink implements DigitalEmployeeControlSink {
         }
       })
       if (input === undefined) child.stdin.end()
+      else if (typeof input === 'string') child.stdin.end(input)
       else child.stdin.end(`${JSON.stringify(input)}\n`)
     })
   }

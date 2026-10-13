@@ -212,7 +212,7 @@ async function collectDigitalEmployeeReport(
       'digital-employee-capabilities',
       'digital-employee.capabilities-verified',
       'digital-employee.capabilities-unverified',
-      'DWS event/reply/operator-private 契约与本地必需审计已通过运行时探测',
+      'DWS event/chat/binding 契约与本地必需审计已通过运行时探测',
       '尚未观察到兼容 DWS 能力探测结果',
     ),
   )
@@ -239,7 +239,10 @@ async function collectDigitalEmployeeReport(
       id: 'digital-employee-runtime',
       status: 'fail',
       code: 'digital-employee.failed',
-      message: `数字员工事件进程启动或运行失败（${failureCode}）`,
+      message:
+        failureCode === 'incompatible_dws_capabilities'
+          ? '请升级 DWS：数字员工要求 chatDelivery=true，并使用通用 chat 发送'
+          : `数字员工事件进程启动或运行失败（${failureCode}）`,
     })
   } else {
     checks.push({

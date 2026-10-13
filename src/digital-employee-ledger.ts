@@ -7,6 +7,7 @@ const LEDGER_LIMIT = 10_000
 interface LedgerData {
   seenEvents: Record<string, number>
   sentMessageIds: Record<string, number>
+  failureNoticeAttempts: Record<string, number>
 }
 
 function isLedgerRecord(value: unknown): value is Record<string, number> {
@@ -38,7 +39,7 @@ export function atomicPrivateJsonWrite(file: string, value: unknown): void {
 
 /** 每个数字员工独立持久化事件去重与已发送消息 ID。 */
 export class DigitalEmployeeLedger {
-  private data: LedgerData = { seenEvents: {}, sentMessageIds: {} }
+  private data: LedgerData = { seenEvents: {}, sentMessageIds: {}, failureNoticeAttempts: {} }
 
   constructor(private readonly file: string) {
     mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 })
@@ -47,7 +48,13 @@ export class DigitalEmployeeLedger {
         const parsed = JSON.parse(readFileSync(file, 'utf8')) as Partial<LedgerData>
         if (!isLedgerRecord(parsed.seenEvents) || !isLedgerRecord(parsed.sentMessageIds))
           throw new Error('invalid_ledger')
-        this.data = { seenEvents: parsed.seenEvents, sentMessageIds: parsed.sentMessageIds }
+        if (parsed.failureNoticeAttempts !== undefined && !isLedgerRecord(parsed.failureNoticeAttempts))
+          throw new Error('invalid_ledger')
+        this.data = {
+          seenEvents: parsed.seenEvents,
+          sentMessageIds: parsed.sentMessageIds,
+          failureNoticeAttempts: parsed.failureNoticeAttempts ?? {},
+        }
       } catch {
         throw new Error('digital_employee_ledger_corrupt')
       }
@@ -72,9 +79,18 @@ export class DigitalEmployeeLedger {
     this.save()
   }
 
+  /** 发送前持久化领取；通知失败或进程重启也不重复尝试。 */
+  claimFailureNotice(key: string): boolean {
+    if (this.data.failureNoticeAttempts[key] !== undefined) return false
+    this.data.failureNoticeAttempts[key] = Date.now()
+    this.save()
+    return true
+  }
+
   private save(): void {
     this.data.seenEvents = trimLedger(this.data.seenEvents)
     this.data.sentMessageIds = trimLedger(this.data.sentMessageIds)
+    this.data.failureNoticeAttempts = trimLedger(this.data.failureNoticeAttempts)
     atomicPrivateJsonWrite(this.file, this.data)
   }
 }
