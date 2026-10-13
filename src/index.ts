@@ -384,7 +384,15 @@ async function startDigitalEmployee(
         if (stopping || !currentDefault()) throw new Error('executor_not_ready')
         await replySink.verifyBinding()
         if (stopping) throw new Error('employee_stopping')
-        await lease.start()
+        try {
+          await lease.start()
+        } catch (error) {
+          // IPC 启动与宿主初始化共用此日志；lease 只返回本地固定分类和恢复提示。
+          log(
+            `employee lease startup failed (${error instanceof Error ? error.message : 'employee_lease_unavailable'})`,
+          )
+          throw error
+        }
         if (stopping) throw new Error('employee_stopping')
         await runtime.start()
         log(`channel up: profile=${employee.dwsProfile} protocol=1 interactions=${a2ui.available() ? 'a2ui' : 'text'}`)

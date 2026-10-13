@@ -8,6 +8,7 @@ import { strictAgentContext } from './helpers/strict-agent-context.mjs'
 
 import { authorizeDigitalEmployeeEvent, DwsDigitalEmployeeSource } from '../lib/digital-employee-runtime.js'
 import { apply } from '../lib/index.js'
+import { requestEmployeeControl } from '../lib/digital-employee-control.js'
 
 async function waitFor(check) {
   for (let attempt = 0; attempt < 200; attempt++) {
@@ -306,6 +307,11 @@ if (args.includes('--help')) {
   process.exit(0)
 }
 if (args.includes('--local-lease')) {
+  fs.appendFileSync(record, JSON.stringify({ operation: 'lease', args }) + '\\n')
+  if (process.env.FAKE_DWS_LEASE_ERROR) {
+    process.stderr.write(process.env.FAKE_DWS_LEASE_ERROR, () => process.exit(3))
+    return
+  }
   process.stderr.write('[employee] leased\\n')
   process.stdin.resume()
   process.stdin.on('end', () => process.exit(0))
@@ -569,6 +575,71 @@ function pluginConfig(workspace, digitalEmployees) {
     debug: false,
   }
 }
+
+test(
+  '旧绑定迁移失败在 lease 阶段停止，未消费消息或启动模型且输出固定恢复提示',
+  { skip: process.platform === 'win32' },
+  async (t) => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-lease-'))
+    const keys = ['PATH', 'FAKE_DWS_RECORD', 'DSH_DINGTALK_STATE_DIR', 'FAKE_DWS_LEASE_ERROR']
+    const old = Object.fromEntries(keys.map((key) => [key, process.env[key]]))
+    const binDir = path.join(root, 'bin')
+    await mkdir(binDir)
+    await createFakeDws(binDir, true)
+    const recordFile = path.join(root, 'calls.jsonl')
+    const stateDir = path.join(root, 'state')
+    Object.assign(process.env, {
+      PATH: `${binDir}${path.delimiter}${process.env.PATH}`,
+      FAKE_DWS_RECORD: recordFile,
+      DSH_DINGTALK_STATE_DIR: stateDir,
+      FAKE_DWS_LEASE_ERROR: JSON.stringify({
+        error: {
+          code: 3,
+          category: 'validation',
+          reason: 'visibility_supervisor_missing',
+          retryable: false,
+          message: 'PRIVATE_MIGRATION_ERROR',
+          hint: 'PRIVATE_RECOVERY_HINT',
+        },
+      }),
+    })
+    const logs = []
+    t.mock.method(console, 'log', (line) => logs.push(String(line)))
+    const host = createHost()
+    t.after(async () => {
+      await host.dispose()
+      for (const key of keys) {
+        if (old[key] === undefined) delete process.env[key]
+        else process.env[key] = old[key]
+      }
+      await rm(root, { recursive: true, force: true })
+    })
+    await apply(host.ctx, { ...pluginConfig(path.join(root, 'workspace'), [employee]), interactionMode: 'text' })
+    const calls = (await readFile(recordFile, 'utf8')).trim().split('\n').map(JSON.parse)
+    assert.deepEqual(
+      calls.map((call) => call.operation),
+      ['binding', 'lease'],
+    )
+    assert.equal(host.followups.length, 0)
+    assert.equal(host.sessions.length, 0)
+    const status = await requestEmployeeControl(
+      {
+        protocolVersion: 1,
+        action: 'status',
+        agentUuid: employee.agentUuid,
+        dwsProfile: employee.dwsProfile,
+        bindingRevision: 0,
+      },
+      stateDir,
+    )
+    assert.equal(status.runtimeState, 'stopped')
+    assert.equal(status.transportReady, false)
+    assert.equal(status.executorReady, false)
+    assert.equal(status.released, true)
+    assert.match(logs.join('\n'), /visibility_supervisor_missing: .*原主管账号.*connect restart/)
+    assert.doesNotMatch(logs.join('\n'), /PRIVATE_MIGRATION_ERROR|PRIVATE_RECOVERY_HINT|channel up/)
+  },
+)
 
 test('上下文单参数 setup 后，文字审批由钉钉接管并可取消', { skip: process.platform === 'win32' }, async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-text-approval-'))
@@ -1184,6 +1255,14 @@ for (const scenario of ['visible', 'revoked', 'unavailable', 'local']) {
       audits[0].status,
       scenario === 'unavailable' ? 'unavailable' : scenario === 'revoked' ? 'denied' : 'accepted',
     )
+    if (scenario === 'unavailable') {
+      assert.notEqual(runtime.currentStatus().state, 'failed', '单次可见范围查询失败不能变成永久全局阻断')
+      runtime.replySink.visibilityAccess = async () => true
+      await runtime.handleEvent({ ...event, eventId: 'visibility-recovered-event', messageId: 'recovered-message' })
+      assert.equal(seen.length, 1, '查询恢复后下一条消息正常进入调度')
+      assert.equal(audits[1].status, 'accepted')
+      assert.equal(runtime.ledger.hasEvent('visibility-recovered-event'), true)
+    }
   })
 }
 

@@ -28,6 +28,19 @@ DSH 提供 `digital-employee runtime --stdin --json` 私有机器入口。输入
 
 启动前读 DWS `channel binding --stdin`，核对身份、绑定版本及 running 期望；随后持有 DWS 内部 Profile lease，才启动 Consumer。lease 与原生 Adapter 共享运行锁，同机同配置目录互斥。旧 DSH 宿主没有该协议，升级时必须先正常退出旧宿主。
 
+配套 DWS 在取得 lease 前检查旧绑定的可见范围查询身份，并在同一启动预算内迁移可验证的旧绑定。迁移未完成时，插件不会启动 Consumer 或模型，也不会将员工标记为 ready。DWS 非零退出时，插件解析 stdout 的完整统一结果：`ok=false`、`outcome=failure`、`error.type=validation`、`error.exit_code=3`，并从 `error.subtype` 识别下列分类；`retryable` 须省略或为 `false`（统一结果省略布尔默认值）。仅当 stdout 为空时兼容旧版 stderr 错误（`code=3`、`category=validation`、`retryable=false`），不会从两个输出中择优或按自由文本猜测错误：
+
+| 启动失败码                                                          | 恢复方式                                                                  |
+| ------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| `visibility_supervisor_missing` / `visibility_supervisor_ambiguous` | 使用原主管账号执行 `dws dingtalk-tag connect restart`，固定主管查询身份。 |
+| `visibility_supervisor_unavailable`                                 | 检查原主管账号登录状态后重启目标员工。                                    |
+| `visibility_identity_mismatch`                                      | 核对原主管和当前绑定，不手改身份字段。                                    |
+| `visibility_migration_timeout` / `visibility_migration_unavailable` | 检查网络及本地 DWS 日志，再由原主管账号重启目标员工。                     |
+| `visibility_binding_changed`                                        | 核对当前绑定后重新启动，不能覆盖并发发生的绑定变更。                      |
+| `visibility_migration_persist_failed`                               | 检查配置目录写权限后重新启动。                                            |
+
+这些固定分类和中文提示写入宿主的 `employee lease startup failed` 日志；DWH 通常位于 `var/<employee>/logs/agent.log`。原始 stderr、服务端 message/hint/cause 不透传。未知分类、非 JSON、混杂日志、超限输出仍报 `employee_lease_unavailable`。启动失败完成正常清理后可恢复配置再重试；消息处理中的临时可见范围查询失败仍只拒绝本条消息，不因该查询失败把员工永久设为全局 fail-closed。
+
 停止顺序：禁止新任务并丢弃未执行队列 → 取消审批/问题等待 → 停 Consumer → 取消并 dispose 本 Channel 自己创建/恢复的 Agent → 等待回合、事件与所有下行调用结束 → 移除监听 → 最后释放 lease。借用 Web UI 所有的运行实例会被拒绝，不 dispose 其他实例。无法确认释放时保留阻塞状态，不承诺换绑成功。
 
 A2UI 与文字审批/问答都随目标员工停止取消。决定审计和终态卡片更新排空后才确认释放；迟到回复与重连期间完成的旧入站不能恢复 ready，仅真实订阅就绪才能恢复连接状态。
