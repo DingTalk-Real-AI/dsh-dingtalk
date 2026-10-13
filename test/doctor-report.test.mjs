@@ -265,6 +265,60 @@ test('数字员工诊断按员工输出 Profile、能力、ready、订阅、事�
   )
 })
 
+test('数字员工诊断兼容全群与仅 @ 订阅，缺失或陈旧订阅不能通过', async (t) => {
+  const direct = 'user_im_message_receive_o2o_all'
+  const group = 'user_im_message_receive_group_all'
+  const mention = 'user_im_message_receive_at'
+  const cases = [
+    { name: '全群订阅', topics: [direct, group], ready: true },
+    { name: '仅 @ 员工订阅', topics: [direct, mention], ready: true },
+    { name: '缺少单聊订阅', topics: [mention], ready: false },
+    { name: '缺少群聊订阅', topics: [direct, 'user_card_action_triggered'], ready: false },
+    { name: '缺少全部订阅', topics: [], ready: false },
+    { name: '陈旧的仅 @ 员工订阅', topics: [direct, mention], stale: true, ready: false },
+  ]
+  for (const scenario of cases) {
+    await t.test(scenario.name, async (t) => {
+      const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-de-doctor-subscription-'))
+      t.after(() => import('node:fs/promises').then((fs) => fs.rm(root, { recursive: true, force: true })))
+      const dshHome = await createProfile(
+        root,
+        [
+          '- id: dingtalk-channel',
+          '  config:',
+          '    digitalEmployees:',
+          '      - agentUuid: employee-subscription',
+          '        dwsProfile: corp-subscription:user-subscription',
+          '        operatorOpenDingTalkId: operator-subscription',
+          '        protocolVersion: 1',
+          '',
+        ].join('\n'),
+      )
+      const stateDir = path.join(root, 'state')
+      const runtimeDir = path.join(stateDir, 'digital-employees', 'employee-subscription')
+      await mkdir(runtimeDir, { recursive: true })
+      await writeFile(
+        path.join(runtimeDir, 'runtime.json'),
+        JSON.stringify({
+          state: 'ready',
+          observedAt: Date.now() - (scenario.stale ? 31_000 : 0),
+          subscriptionTopics: scenario.topics,
+        }),
+      )
+
+      const report = await collectDoctorReport({ mode: 'offline', dshHome, stateDir })
+      const subscription = report.digitalEmployees[0].checks.find(
+        (check) => check.id === 'digital-employee-subscription',
+      )
+      assert.equal(subscription.status, scenario.ready ? 'pass' : 'unverified')
+      assert.equal(
+        subscription.code,
+        scenario.ready ? 'digital-employee.subscription-ready' : 'digital-employee.subscription-unverified',
+      )
+    })
+  }
+})
+
 test('数字员工陈旧状态不能继续报告 ready、能力、订阅或最近链路通过', async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-dingtalk-de-doctor-stale-'))
   t.after(() => import('node:fs/promises').then((fs) => fs.rm(root, { recursive: true, force: true })))
