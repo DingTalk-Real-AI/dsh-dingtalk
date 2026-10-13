@@ -7,26 +7,7 @@ import test from 'node:test'
 
 import { EmployeeLease } from '../lib/digital-employee-lease.js'
 
-const reasons = [
-  'visibility_supervisor_missing',
-  'visibility_supervisor_ambiguous',
-  'visibility_supervisor_unavailable',
-  'visibility_identity_mismatch',
-  'visibility_migration_timeout',
-  'visibility_binding_changed',
-  'visibility_migration_persist_failed',
-  'visibility_migration_unavailable',
-]
 const privateText = 'PRIVATE_UPSTREAM_TEXT 不得进入日志的原始错误'
-const errorFor = (reason) => ({
-  error: { code: 3, category: 'validation', reason, retryable: false, message: privateText, hint: privateText },
-})
-const unifiedErrorFor = (subtype) => ({
-  ok: false,
-  outcome: 'failure',
-  error: { exit_code: 3, type: 'validation', subtype, message: privateText, hint: privateText },
-})
-
 async function fixture(t, { stderr = '', stdout = '', exitCode = 3, leased = false, signal = false } = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'employee-lease-'))
   const bin = path.join(root, 'bin')
@@ -65,97 +46,50 @@ process.stderr.write(${JSON.stringify(stderr)}, () => {
   return { lease, losses: () => losses }
 }
 
-for (const reason of reasons) {
-  test(`lease 启动识别统一 stdout 结果：${reason}`, { skip: process.platform === 'win32' }, async (t) => {
-    const { lease, losses } = await fixture(t, { stdout: JSON.stringify(unifiedErrorFor(reason), null, 2) })
-    await assert.rejects(lease.start(), (error) => {
-      assert.ok(error.message.startsWith(`${reason}: `))
-      assert.match(error.message, /原主管账号.*connect restart/)
-      assert.doesNotMatch(error.message, /PRIVATE_UPSTREAM_TEXT/)
-      return true
-    })
-    assert.equal(lease.lost, true)
-    assert.equal(losses(), 1)
-  })
-  test(`lease 启动保留安全迁移分类：${reason}`, { skip: process.platform === 'win32' }, async (t) => {
-    const { lease, losses } = await fixture(t, { stderr: JSON.stringify(errorFor(reason), null, 2) })
-    await assert.rejects(lease.start(), (error) => {
-      assert.ok(error.message.startsWith(`${reason}: `))
-      assert.match(error.message, /原主管账号.*connect restart/)
-      assert.doesNotMatch(error.message, /PRIVATE_UPSTREAM_TEXT/)
-      return true
-    })
-    assert.equal(lease.lost, true)
-    assert.equal(losses(), 1)
-  })
-}
-
-const known = errorFor(reasons[0])
-const unifiedKnown = unifiedErrorFor(reasons[0])
 for (const [name, options] of [
-  ['未知分类', { stderr: JSON.stringify(errorFor('untrusted_reason')) }],
-  ['原型属性名', { stderr: JSON.stringify(errorFor('toString')) }],
-  ['退出成功', { stderr: JSON.stringify(known), exitCode: 0 }],
-  ['信号退出', { stderr: JSON.stringify(known), signal: true }],
-  ['自由文本伪造 reason', { stderr: `${reasons[0]} ${privateText}` }],
-  ['JSON 之前混杂日志', { stderr: `${privateText}\n${JSON.stringify(known)}` }],
-  ['JSON 后面混杂日志', { stderr: `${JSON.stringify(known)}\n${privateText}` }],
-  ['多个 JSON', { stderr: `${JSON.stringify(known)}\n${JSON.stringify(known)}` }],
-  ['JSON 数组', { stderr: JSON.stringify([known]) }],
-  ['错误对象数组', { stderr: JSON.stringify({ error: [known.error] }) }],
-  ['外层成功响应', { stderr: JSON.stringify({ ok: true, ...known }) }],
-  ['错误码类型不符', { stderr: JSON.stringify({ error: { ...known.error, code: '3' } }) }],
-  ['错误码不符', { stderr: JSON.stringify({ error: { ...known.error, code: 2 } }) }],
-  ['类别不符', { stderr: JSON.stringify({ error: { ...known.error, category: 'internal' } }) }],
-  ['retryable 缺失', { stderr: JSON.stringify({ error: { ...known.error, retryable: undefined } }) }],
-  ['retryable 字符串', { stderr: JSON.stringify({ error: { ...known.error, retryable: 'false' } }) }],
-  ['retryable 为真', { stderr: JSON.stringify({ error: { ...known.error, retryable: true } }) }],
-  ['仅 stdout 有分类', { stdout: JSON.stringify(known) }],
-  ['输出超限', { stdout: 'x'.repeat(65_537), stderr: JSON.stringify(known) }],
-  ['统一结果 ok 为真', { stdout: JSON.stringify({ ...unifiedKnown, ok: true }) }],
-  ['统一结果缺少 ok', { stdout: JSON.stringify({ ...unifiedKnown, ok: undefined }) }],
-  ['统一结果 outcome 不符', { stdout: JSON.stringify({ ...unifiedKnown, outcome: 'success' }) }],
-  ['统一错误码不符', { stdout: JSON.stringify({ ...unifiedKnown, error: { ...unifiedKnown.error, exit_code: 2 } }) }],
   [
-    '统一错误码类型不符',
-    { stdout: JSON.stringify({ ...unifiedKnown, error: { ...unifiedKnown.error, exit_code: '3' } }) },
+    'stdout 业务错误',
+    {
+      stdout: JSON.stringify({
+        ok: false,
+        outcome: 'failure',
+        error: { type: 'validation', exit_code: 3, subtype: 'visibility_supervisor_missing', message: privateText },
+      }),
+    },
   ],
   [
-    '统一错误类别不符',
-    { stdout: JSON.stringify({ ...unifiedKnown, error: { ...unifiedKnown.error, type: 'internal' } }) },
+    'stderr 业务错误',
+    {
+      stderr: JSON.stringify({
+        error: {
+          code: 3,
+          category: 'validation',
+          reason: 'visibility_supervisor_missing',
+          retryable: false,
+          message: privateText,
+        },
+      }),
+    },
   ],
-  ['统一错误未知分类', { stdout: JSON.stringify(unifiedErrorFor('untrusted_reason')) }],
-  [
-    '统一错误可重试',
-    { stdout: JSON.stringify({ ...unifiedKnown, error: { ...unifiedKnown.error, retryable: true } }) },
-  ],
-  [
-    '统一错误 retryable 类型不符',
-    { stdout: JSON.stringify({ ...unifiedKnown, error: { ...unifiedKnown.error, retryable: 'false' } }) },
-  ],
-  ['统一结果夹带成功数据', { stdout: JSON.stringify({ ...unifiedKnown, data: {} }) }],
-  ['无效 stdout 不回退 stderr', { stdout: privateText, stderr: JSON.stringify(known) }],
-  [
-    '未知 stdout 分类不回退 stderr',
-    { stdout: JSON.stringify(unifiedErrorFor('untrusted_reason')), stderr: JSON.stringify(known) },
-  ],
+  ['自由文本', { stderr: privateText }],
+  ['意外成功退出', { stdout: privateText, exitCode: 0 }],
+  ['信号退出', { stderr: privateText, signal: true }],
+  ['输出超限', { stdout: 'x'.repeat(65_537) }],
 ]) {
-  test(`lease 不信任非协议错误：${name}`, { skip: process.platform === 'win32' }, async (t) => {
-    const { lease } = await fixture(t, options)
-    await assert.rejects(lease.start(), { message: 'employee_lease_unavailable' })
-  })
+  test(
+    `lease 未取得时只返回通用错误，不再依赖主管迁移分类：${name}`,
+    { skip: process.platform === 'win32' },
+    async (t) => {
+      const { lease, losses } = await fixture(t, options)
+      await assert.rejects(lease.start(), { message: 'employee_lease_unavailable' })
+      assert.equal(lease.lost, true)
+      assert.equal(losses(), 1)
+    },
+  )
 }
-
-test('统一结果为唯一权威，兼容显式 retryable=false', { skip: process.platform === 'win32' }, async (t) => {
-  const { lease } = await fixture(t, {
-    stdout: JSON.stringify({ ...unifiedKnown, error: { ...unifiedKnown.error, retryable: false } }),
-    stderr: JSON.stringify(errorFor(reasons[1])),
-  })
-  await assert.rejects(lease.start(), (error) => error.message.startsWith(`${reasons[0]}: `))
-})
 
 test(
-  '本地联合验收：真实 DWS 启动错误保留安全分类且不发布 lease',
+  '本地联合验收：缺少主管字段的旧受管绑定离线启动和释放 lease',
   {
     skip: process.platform === 'win32' || !process.env.DWS_JOINT_BINARY,
   },
@@ -217,8 +151,12 @@ test(
       }
       await rm(root, { recursive: true, force: true })
     })
-    await assert.rejects(lease.start(), /^Error: visibility_supervisor_unavailable: .*原主管账号/)
-    assert.equal(lease.lost, true)
+    await lease.start()
+    assert.equal(lease.lost, false)
+    const guard = path.join(config, 'digital-employees', `employee-${digest}`, 'lease-guard.json')
+    assert.ok((await readFile(guard, 'utf8')).length > 0)
+    await lease.stop()
+    assert.equal(lease.lost, false)
     assert.equal(await readFile(bindingPath, 'utf8'), binding)
     await assert.rejects(readFile(path.join(config, 'digital-employees', `employee-${digest}`, 'lease-guard.json')), {
       code: 'ENOENT',
@@ -230,7 +168,7 @@ test(
   '已取得 lease 后的错误文本不重新分类启动，正常释放不报告丢失',
   { skip: process.platform === 'win32' },
   async (t) => {
-    const { lease, losses } = await fixture(t, { stderr: JSON.stringify(known) + '\n', leased: true })
+    const { lease, losses } = await fixture(t, { stderr: privateText + '\n', leased: true })
     await lease.start()
     assert.equal(lease.lost, false)
     await lease.stop()

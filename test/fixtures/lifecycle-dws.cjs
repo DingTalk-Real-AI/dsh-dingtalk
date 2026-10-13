@@ -28,7 +28,7 @@ if (args.includes('--local-lease')) {
     schemaVersion: 1,
     protocolVersion: 1,
     auditMode: 'local_required',
-    capabilities: { eventConsume: true, chatDelivery: true },
+    capabilities: { eventConsume: true, chatDelivery: true, bindingAccessPolicy: true },
   })
 } else if (args.includes('consume')) {
   fs.writeFileSync(file('consumer-active'), String(process.pid), { flag: 'wx' })
@@ -62,7 +62,14 @@ if (args.includes('--local-lease')) {
           idempotencyKey: args[args.indexOf('--idempotency-key') + 1],
         }
     if (args.includes('binding')) {
-      envelope({ ...value, dwsProfile: profile, channel: 'dsh', bindingState: 'bound', desiredState: 'running' })
+      envelope({
+        ...value,
+        dwsProfile: profile,
+        channel: 'dsh',
+        bindingState: 'bound',
+        desiredState: 'running',
+        accessPolicy: 'local_allowlist',
+      })
     } else if (args.includes('+messages-reply')) {
       fs.writeFileSync(file('reply-active'), String(process.pid), { flag: 'wx' })
       record('reply-started')

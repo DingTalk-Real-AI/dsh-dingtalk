@@ -121,6 +121,7 @@ export class DwsDigitalEmployeeSource implements InboundSource {
   private restarting = false
   private lastRetryable: boolean | undefined
   private heartbeat?: ReturnType<typeof setInterval>
+  private preparation?: Promise<void>
   readonly replySink: DwsDigitalEmployeeReplySink
 
   constructor(private readonly options: DigitalEmployeeRuntimeOptions) {
@@ -150,7 +151,7 @@ export class DwsDigitalEmployeeSource implements InboundSource {
 
   async start(): Promise<void> {
     try {
-      await this.probe()
+      await this.prepare()
       if (this.stopped) return
       this.updateStatus({ state: 'connecting' })
       try {
@@ -191,8 +192,14 @@ export class DwsDigitalEmployeeSource implements InboundSource {
     return { ...this.status }
   }
 
-  private async probe(): Promise<void> {
+  prepare(): Promise<void> {
+    return (this.preparation ??= this.prepareBinding())
+  }
+
+  private async prepareBinding(): Promise<void> {
     await this.replySink.probe()
+    await this.replySink.verifyBinding()
+    await this.replySink.audit({ operationType: 'runtime_start', status: 'ready' })
     this.updateStatus({
       capabilitiesVerifiedAt: Date.now(),
       subscriptionTopics: this.subscriptionTopics(),
@@ -358,16 +365,12 @@ export class DwsDigitalEmployeeSource implements InboundSource {
 
   private async handleEvent(event: DigitalEmployeeEvent): Promise<void> {
     if (this.stopped) return
+    if (this.replySink.isSelfMessage(event)) return
     if (event.conversationType === 'group' && this.replySink.requiresGroupMention() && !event.isMention) return
     if (this.ledger.hasEvent(event.eventId) || this.ledger.hasSentMessage(event.messageId)) return
-    let visibility: boolean | undefined
-    try {
-      visibility = await this.replySink.visibilityAccess(event)
-    } catch {
-      await this.replySink.audit({ eventId: event.eventId, operationType: 'access_check', status: 'unavailable' })
-      throw new Error('visibility_access_unavailable')
-    }
-    const allowed = visibility ?? authorizeDigitalEmployeeEvent(this.options.employee, event)
+    // 只有启动时验证的受管绑定信任平台投递；其他场景继续使用本地白名单。
+    const allowed =
+      this.replySink.bindingAccessPolicy() === 'platform' || authorizeDigitalEmployeeEvent(this.options.employee, event)
     if (!allowed) {
       await this.replySink.audit({ eventId: event.eventId, operationType: 'access_check', status: 'denied' })
       this.ledger.markEvent(event.eventId)

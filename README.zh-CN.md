@@ -23,7 +23,7 @@
 
 ## 数字员工 Channel（文本 MVP）
 
-数字员工是与机器人平级的新 Channel：机器人仍可在不安装 DWS 的环境中工作；只有启用数字员工时才要求兼容 DWS companion runtime。DWS 负责 connect、授权码交换和 Profile 凭据，local_agent 私聊由 DWS 按 DEAP 已发布可见范围判定权限，群聊在已入群时放行，但仅原生 @ 当前员工才触发回复（需 DWS 声明 groupMembershipAccess），其他场景保留本地白名单；DSH 负责事件进程、Session、Queue、Agent、文本回复和诊断，DSH 不保存 Token、AuthCode 或 Client Secret。
+数字员工是与机器人平级的新 Channel：机器人仍可在不安装 DWS 的环境中工作；只有启用数字员工时才要求兼容 DWS companion runtime。DWS 负责 connect、授权码交换和 Profile 凭据，local_agent 信任平台投递授权（私聊可见即可聊，撤销后旧会话也不投递），群聊仅原生 @ 当前员工才触发回复；启动要求 DWS 声明 bindingAccessPolicy 并返回已验证的 platform 策略，不再逐条查询可见范围，也不依赖旧绑定主管查询字段迁移。其他场景返回 local_allowlist 并保留本地白名单及原群消息触发规则；DSH 负责事件进程、Session、Queue、Agent、文本回复和诊断，DSH 不保存 Token、AuthCode 或 Client Secret。
 
 接入必须由 DWS `dingtalk-tag connect --channel dsh` 发起，并通过 stdin 幂等调用本包的 `digital-employee register`。注册后重新运行 `setup` 管理 operator、私聊 OpenDingTalkId 和群 openConversationId 白名单。`doctor` 会按员工显示能力、ready、订阅、最近事件/回复/审计和脱敏失败码。
 

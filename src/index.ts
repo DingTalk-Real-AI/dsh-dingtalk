@@ -382,12 +382,12 @@ async function startDigitalEmployee(
     start: async () => {
       try {
         if (stopping || !currentDefault()) throw new Error('executor_not_ready')
-        await replySink.verifyBinding()
+        await runtime.prepare()
         if (stopping) throw new Error('employee_stopping')
         try {
           await lease.start()
         } catch (error) {
-          // IPC 启动与宿主初始化共用此日志；lease 只返回本地固定分类和恢复提示。
+          // IPC 启动与宿主初始化共用此日志；不透传 lease 的原始服务端错误。
           log(
             `employee lease startup failed (${error instanceof Error ? error.message : 'employee_lease_unavailable'})`,
           )

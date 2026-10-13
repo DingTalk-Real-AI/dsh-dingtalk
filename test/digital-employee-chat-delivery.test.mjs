@@ -29,7 +29,7 @@ function sink(options = {}) {
   })
 }
 
-test('仅声明 chatDelivery 即可接入，正文仅经 stdin 且失败不切换重发', async (t) => {
+test('声明 chatDelivery 和 bindingAccessPolicy 可接入，正文仅经 stdin 且失败不切换重发', async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'employee-chat-'))
   t.after(() => rm(root, { recursive: true, force: true }))
   const trace = path.join(root, 'calls.jsonl')
@@ -41,7 +41,7 @@ const fs = require('node:fs'); const args = process.argv.slice(2);
 let body = ''; process.stdin.setEncoding('utf8'); process.stdin.on('data', c => body += c);
 process.stdin.on('end', () => {
  fs.appendFileSync(${JSON.stringify(trace)}, JSON.stringify({args, body}) + '\\n');
- if (args.includes('capabilities')) { console.log(JSON.stringify({ok:true,outcome:'success',data:{schemaVersion:1,protocolVersion:1,auditMode:'local_required',capabilities:{eventConsume:true,chatDelivery:true}}})); return; }
+ if (args.includes('capabilities')) { console.log(JSON.stringify({ok:true,outcome:'success',data:{schemaVersion:1,protocolVersion:1,auditMode:'local_required',capabilities:{eventConsume:true,chatDelivery:true,bindingAccessPolicy:true}}})); return; }
  if (body.includes('FAIL_ONCE')) { process.exitCode=1; return; }
  const value = {conversationId:args.includes('+messages-reply') ? args[args.indexOf('--group')+1] : 'operator-chat',idempotencyKey:args[args.indexOf('--idempotency-key')+1]};
  const receipt = {openMessageId:'sent',conversationId:value.conversationId || 'operator-chat',deliveryStatus:'delivered',idempotencyKey:value.idempotencyKey};
@@ -251,10 +251,9 @@ test('本地联合验收：DSH → 实际 DWS → 受控 MCP', { skip: !process.
   }
 })
 
-for (const policy of ['deap_visibility', 'local_allowlist', 'invalid']) {
-  test(`绑定访问判定 ${policy}，严校验响应身份且不退回本地放行`, async () => {
+for (const policy of ['platform', 'local_allowlist', 'invalid', undefined]) {
+  test(`绑定访问策略 ${policy}，身份和策略都须验证通过`, async () => {
     const client = sink()
-    client.useVisibilityAccess = true
     let returned = {
       agentUuid: employee.agentUuid,
       dwsProfile: employee.dwsProfile,
@@ -263,58 +262,79 @@ for (const policy of ['deap_visibility', 'local_allowlist', 'invalid']) {
       bindingState: 'bound',
       desiredState: 'running',
       accessPolicy: policy,
-      allowed: false,
+      selfOpenDingTalkId: 'fixture-self',
     }
-    client.execJson = async (args, input) => {
-      assert.ok(args.includes('binding'))
-      assert.equal(input.senderOpenDingTalkId, 'open-sender')
-      return returned
-    }
-    const inbound = { ...event, senderOpenDingTalkId: 'open-sender', senderName: 'name' }
-    if (policy === 'invalid') await assert.rejects(client.visibilityAccess(inbound), /invalid_visibility_access/)
-    else assert.equal(await client.visibilityAccess(inbound), policy === 'local_allowlist' ? undefined : false)
-    returned = { ...returned, agentUuid: 'wrong' }
-    await assert.rejects(client.visibilityAccess(inbound), /binding_not_authorized/)
-  })
-}
-
-for (const supported of [true, false]) {
-  test(`群访问上下文按能力协商 ${supported}`, async () => {
-    const client = sink()
     client.execJson = async (args, input) => {
       if (args.includes('capabilities'))
         return {
           schemaVersion: 1,
           protocolVersion: 1,
           auditMode: 'local_required',
-          capabilities: {
-            eventConsume: true,
-            chatDelivery: true,
-            visibilityAccess: true,
-            groupMembershipAccess: supported,
-          },
+          capabilities: { eventConsume: true, chatDelivery: true, bindingAccessPolicy: true },
         }
-      assert.equal(input.conversationType, supported ? 'group' : undefined)
-      return {
-        agentUuid: employee.agentUuid,
-        dwsProfile: employee.dwsProfile,
-        channel: 'dsh',
-        bindingRevision: 7,
-        bindingState: 'bound',
-        desiredState: 'running',
-        accessPolicy: 'deap_visibility',
-        allowed: true,
-      }
+      assert.ok(args.includes('binding'))
+      assert.deepEqual(input, { agentUuid: employee.agentUuid, bindingRevision: 7 })
+      return returned
     }
+    await assert.rejects(client.verifyBinding(), /incompatible_dws_capabilities/)
     await client.probe()
-    assert.equal(
-      await client.visibilityAccess({
-        ...event,
-        conversationType: 'group',
-        senderOpenDingTalkId: 'group-member',
-        senderName: '成员',
-      }),
-      true,
-    )
+    if (policy !== 'platform' && policy !== 'local_allowlist') {
+      await assert.rejects(client.verifyBinding(), /invalid_binding_access_policy/)
+      assert.throws(() => client.bindingAccessPolicy(), /binding_access_policy_unverified/)
+    } else {
+      await client.verifyBinding()
+      assert.equal(client.bindingAccessPolicy(), policy)
+      assert.equal(client.requiresGroupMention(), policy === 'platform')
+    }
+    returned = { ...returned, agentUuid: 'wrong' }
+    await assert.rejects(client.verifyBinding(), /binding_not_authorized/)
+    assert.throws(() => client.bindingAccessPolicy(), /binding_access_policy_unverified/)
+  })
+}
+
+for (const bindingAccessPolicy of [undefined, false, 'true']) {
+  test(`缺少严格 bindingAccessPolicy=true 拒绝旧 DWS (${bindingAccessPolicy})`, async () => {
+    const client = sink()
+    client.execJson = async () => ({
+      schemaVersion: 1,
+      protocolVersion: 1,
+      auditMode: 'local_required',
+      capabilities: {
+        eventConsume: true,
+        chatDelivery: true,
+        visibilityAccess: true,
+        groupMembershipAccess: true,
+        bindingAccessPolicy,
+      },
+    })
+    await assert.rejects(client.probe(), /incompatible_dws_capabilities: 请升级 DWS/)
+    assert.throws(() => client.bindingAccessPolicy(), /binding_access_policy_unverified/)
+  })
+}
+
+for (const selfOpenDingTalkId of [undefined, '', ' ', 42, 'unsafe\nidentity']) {
+  test(`平台绑定缺少合法自身身份时拒绝启动 (${JSON.stringify(selfOpenDingTalkId)})`, async () => {
+    const client = sink()
+    client.execJson = async (args) =>
+      args.includes('capabilities')
+        ? {
+            schemaVersion: 1,
+            protocolVersion: 1,
+            auditMode: 'local_required',
+            capabilities: { eventConsume: true, chatDelivery: true, bindingAccessPolicy: true },
+          }
+        : {
+            agentUuid: employee.agentUuid,
+            dwsProfile: employee.dwsProfile,
+            channel: 'dsh',
+            bindingRevision: 7,
+            bindingState: 'bound',
+            desiredState: 'running',
+            accessPolicy: 'platform',
+            selfOpenDingTalkId,
+          }
+    await client.probe()
+    await assert.rejects(client.verifyBinding(), /invalid_binding_self_identity/)
+    assert.throws(() => client.bindingAccessPolicy(), /binding_access_policy_unverified/)
   })
 }

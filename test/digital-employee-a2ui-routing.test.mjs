@@ -48,7 +48,8 @@ test('显式卡片订阅直接走控制回调，不进入普通消息/模型队�
       cards++
     },
   })
-  source.replySink.probe = async () => {}
+  source.prepare = async () => {}
+  source.replySink.bindingAccessPolicy = () => 'local_allowlist'
   try {
     await source.start()
     for (let i = 0; i < 100 && !cards; i++) await new Promise((resolve) => setTimeout(resolve, 10))
@@ -101,7 +102,8 @@ test('卡片订阅启动被拒绝后退出旧进程，降级仅消息订阅；�
       fallback++
     },
   })
-  source.replySink.probe = async () => {}
+  source.prepare = async () => {}
+  source.replySink.bindingAccessPolicy = () => 'local_allowlist'
   t.after(async () => {
     await source.stop()
     await rm(root, { recursive: true, force: true })
@@ -144,7 +146,8 @@ test('订阅曾就绪后断线不能自动切换到文字授权通道', async (t
       fallback++
     },
   })
-  source.replySink.probe = async () => {}
+  source.prepare = async () => {}
+  source.replySink.bindingAccessPolicy = () => 'local_allowlist'
   t.after(async () => {
     await source.stop()
     await rm(root, { recursive: true, force: true })
