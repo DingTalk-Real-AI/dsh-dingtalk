@@ -51,8 +51,7 @@ interface DwsCapabilities {
   capabilities: {
     eventConsume: true
     chatDelivery: true
-    visibilityAccess?: boolean
-    groupMembershipAccess?: boolean
+    bindingAccessPolicy: true
   }
 }
 
@@ -98,8 +97,9 @@ function idempotencyKey(employee: DigitalEmployeeConfig, event: DigitalEmployeeE
 
 /** DWS 的安全 stdin 回复、operator 私聊、审计与能力探测客户端。 */
 export class DwsDigitalEmployeeReplySink implements DigitalEmployeeControlSink {
-  private useVisibilityAccess = false
-  private useGroupMembershipAccess = false
+  private bindingAccessPolicySupported = false
+  private accessPolicy?: 'platform' | 'local_allowlist'
+  private selfOpenDingTalkId?: string
   private readonly activeCalls = new Set<Promise<unknown>>()
   private readonly pendingReplies = new Map<string, Set<Promise<unknown>>>()
 
@@ -310,14 +310,15 @@ export class DwsDigitalEmployeeReplySink implements DigitalEmployeeControlSink {
       result.protocolVersion !== 1 ||
       result.auditMode !== 'local_required' ||
       capabilities?.eventConsume !== true ||
-      capabilities.chatDelivery !== true
+      capabilities.chatDelivery !== true ||
+      capabilities.bindingAccessPolicy !== true
     ) {
       this.options.onFailure('incompatible_dws_capabilities')
-      throw new Error('incompatible_dws_capabilities: 请升级 DWS，数字员工要求 chatDelivery=true')
+      throw new Error(
+        'incompatible_dws_capabilities: 请升级 DWS，数字员工要求 chatDelivery=true 和 bindingAccessPolicy=true',
+      )
     }
-    this.useVisibilityAccess = capabilities.visibilityAccess === true
-    this.useGroupMembershipAccess = capabilities.groupMembershipAccess === true
-    await this.audit({ operationType: 'runtime_start', status: 'ready' })
+    this.bindingAccessPolicySupported = true
   }
 
   // 这是 connect 已授权自动回传的绑定约束；主管不能从普通用户白名单推断。
@@ -335,7 +336,7 @@ export class DwsDigitalEmployeeReplySink implements DigitalEmployeeControlSink {
     if (pending.length) await Promise.allSettled(pending)
   }
 
-  private async queryBinding(event?: DigitalEmployeeEvent): Promise<Record<string, unknown>> {
+  private async queryBinding(): Promise<Record<string, unknown>> {
     const employee = this.options.employee
     const result = (await this.execJson(
       [
@@ -353,8 +354,6 @@ export class DwsDigitalEmployeeReplySink implements DigitalEmployeeControlSink {
       {
         agentUuid: employee.agentUuid,
         bindingRevision: employee.bindingRevision ?? 0,
-        ...(event ? { senderOpenDingTalkId: event.senderOpenDingTalkId, senderName: event.senderName } : {}),
-        ...(event && this.useGroupMembershipAccess ? { conversationType: event.conversationType } : {}),
       },
     )) as Record<string, unknown>
     if (
@@ -370,21 +369,41 @@ export class DwsDigitalEmployeeReplySink implements DigitalEmployeeControlSink {
   }
 
   async verifyBinding(): Promise<void> {
-    await this.queryBinding()
+    this.accessPolicy = undefined
+    this.selfOpenDingTalkId = undefined
+    if (!this.bindingAccessPolicySupported) {
+      throw new Error('incompatible_dws_capabilities: 请先探测并升级支持 bindingAccessPolicy=true 的 DWS')
+    }
+    const result = await this.queryBinding()
+    if (result.accessPolicy !== 'platform' && result.accessPolicy !== 'local_allowlist') {
+      throw new Error('invalid_binding_access_policy: 请升级 DWS，绑定须返回 platform 或 local_allowlist')
+    }
+    const self = result.selfOpenDingTalkId
+    if (
+      (result.accessPolicy === 'platform' || self !== undefined) &&
+      (typeof self !== 'string' ||
+        !self.trim() ||
+        self.trim() !== self ||
+        self.length > 512 ||
+        /[\u0000-\u001f]/.test(self))
+    ) {
+      throw new Error('invalid_binding_self_identity: 请检查 DWS 员工自身身份后重启')
+    }
+    this.selfOpenDingTalkId = self as string | undefined
+    this.accessPolicy = result.accessPolicy
+  }
+
+  isSelfMessage(event: DigitalEmployeeEvent): boolean {
+    return event.senderOpenDingTalkId === this.selfOpenDingTalkId
   }
 
   requiresGroupMention(): boolean {
-    return this.useGroupMembershipAccess
+    return this.bindingAccessPolicy() === 'platform'
   }
 
-  async visibilityAccess(event: DigitalEmployeeEvent): Promise<boolean | undefined> {
-    if (!this.useVisibilityAccess) return undefined
-    const result = await this.queryBinding(event)
-    if (result.accessPolicy === 'local_allowlist') return undefined
-    if (result.accessPolicy !== 'deap_visibility' || typeof result.allowed !== 'boolean') {
-      throw new Error('invalid_visibility_access')
-    }
-    return result.allowed
+  bindingAccessPolicy(): 'platform' | 'local_allowlist' {
+    if (!this.accessPolicy) throw new Error('binding_access_policy_unverified')
+    return this.accessPolicy
   }
 
   private trackPendingReply(conversationId: string, delivery: Promise<unknown>): void {

@@ -46,22 +46,25 @@ export class EmployeeLease {
         child.kill('SIGTERM')
         reject(new Error('employee_lease_timeout'))
       }, 12_000)
-      const fail = () => {
+      const fail = (error = new Error('employee_lease_unavailable')) => {
         clearTimeout(timer)
-        if (!ready) reject(new Error('employee_lease_unavailable'))
-        if (!this.closing) {
+        if (!ready) reject(error)
+        if (!this.closing && !this.lost) {
           this.lost = true
           this.onLost()
         }
       }
-      child.once('error', fail)
+      child.once('error', () => fail())
       child.once('close', () => {
         this.closed = true
         fail()
       })
       child.stdout.on('data', (chunk) => {
         bytes += chunk.length
-        if (bytes > 65536) child.kill('SIGTERM')
+        if (bytes > 65536) {
+          child.kill('SIGTERM')
+          return
+        }
       })
       child.stderr.on('data', (chunk) => {
         bytes += chunk.length
