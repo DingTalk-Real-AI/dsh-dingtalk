@@ -26,7 +26,9 @@ DWS 是 binding 与运行期望的权威。用户使用 `dws dingtalk-tag connec
 
 DSH 提供 `digital-employee runtime --stdin --json` 私有机器入口。输入为 protocolVersion、action（prepare/start/status/stop/release）、agentUuid、dwsProfile、bindingRevision；由 `DSH_DINGTALK_STATE_DIR` 下的私有 Unix socket 交给当前宿主。目录 0700、socket 0600；同一目录仅一个控制宿主。宿主不可达返回 unknown，不能视为已停。
 
-启动前读 DWS `channel binding --stdin`，核对身份、绑定版本及 running 期望；随后持有 DWS 内部 Profile lease，才启动 Consumer。lease 与原生 Adapter 共享运行锁，同机同配置目录互斥。旧 DSH 宿主没有该协议，升级时必须先正常退出旧宿主。
+启动先探测 `bindingAccessPolicy=true`，再读 DWS `channel binding --stdin`，核对身份、绑定版本、running 期望及明确的 `accessPolicy`。仅接受 `platform` 或 `local_allowlist`，缺失或未知策略提示升级并拒绝启动；策略只能来自已验证的绑定响应，不能由员工配置自填。平台策略还须返回可信的员工 `selfOpenDingTalkId`，用于过滤未经过插件发送账本的自身消息；DWS 优先读取匹配绑定的本地自身身份，旧绑定缺失时仅用员工自身 Profile 查询一次自己，不查询主管或可见范围。随后持有 DWS 内部 Profile lease，才启动 Consumer。lease 与原生 Adapter 共享运行锁，同机同配置目录互斥。旧 DSH 宿主没有该协议，升级时必须先正常退出旧宿主。
+
+受管 `local_agent` 信任钉钉平台投递授权：私聊可见即可聊，撤销可见性后已有会话也不再投递；群聊只处理原生 @ 当前员工的消息。平台保证切换员工类型后停止向旧绑定投递，切回须重新绑定。插件不逐条查询可见范围，也不依赖主管 Profile 迁移或主管登录状态来启动。DWS 仍在启动和每次发送前核对绑定身份与状态。lease 失败只记录固定 `employee_lease_unavailable`，不透传原始 stdout/stderr、message/hint/cause。
 
 停止顺序：禁止新任务并丢弃未执行队列 → 取消审批/问题等待 → 停 Consumer → 取消并 dispose 本 Channel 自己创建/恢复的 Agent → 等待回合、事件与所有下行调用结束 → 移除监听 → 最后释放 lease。借用 Web UI 所有的运行实例会被拒绝，不 dispose 其他实例。无法确认释放时保留阻塞状态，不承诺换绑成功。
 
@@ -44,15 +46,15 @@ release 在上述停止完成后删除目标注册配置；普通 stop 保留配
 dsh-dingtalk digital-employee unregister --agent-uuid <uuid> --json --yes
 ```
 
-注册后运行交互式 `setup`，选择“管理数字员工 operator 与白名单”。通过 DWS manage/connect 管理的 local_agent 使用 DEAP 已发布可见范围，额外私聊白名单和群白名单不参与授权；其他本地场景默认只有 operator 可私聊。配置只保存稳定身份和 Profile selector，不保存 DWS 凭据。
+注册后运行交互式 `setup`，选择“管理数字员工 operator 与白名单”。通过 DWS manage/connect 管理的 local_agent 信任平台按已发布可见范围授权投递，额外私聊白名单和群白名单不参与授权；其他本地场景默认只有 operator 可私聊。配置只保存稳定身份和 Profile selector，不保存 DWS 凭据。
 
 ## DWS/DSH 协议
 
 DSH 启动每个员工前先执行只读能力探测，要求 DWS 同时声明：
 
 - Event Consume；
-- 文本引用回复 stdin；
-- operator 私聊 stdin；
+- `chatDelivery=true`（通用 chat 文本回复与 operator 私聊）；
+- `bindingAccessPolicy=true`（启动绑定访问策略）；
 - `auditMode=local_required`；
 - `protocolVersion: 1`。
 
@@ -61,9 +63,11 @@ DSH 启动每个员工前先执行只读能力探测，要求 DWS 同时声明�
 ```text
 dws --profile <corpId:userId> event consume
   user_im_message_receive_o2o_all
-  user_im_message_receive_group_all
+  user_im_message_receive_at
   --flatten --format ndjson
 ```
+
+以上为 `platform` 策略；`local_allowlist` 仍订阅 `user_im_message_receive_group_all` 并应用原本地群白名单。
 
 DSH 同时排空 stdout/stderr，只有 ready 行匹配 `^\[event\] ready(?:\s|$)` 后才接受 NDJSON；允许 `event_count`、`bus_pid` 等后缀。`--flatten` 事件不要求额外 schemaVersion，直接消费真实 snake_case 字段：
 
@@ -94,13 +98,13 @@ DWS 对同一发送任务的回执最多等待 2 秒；中途恢复就正常完�
 
 ## 本地运行与隔离
 
-- 支持 `visibilityAccess` 的 DWS 通过 `channel binding` 为每条消息返回访问判定：local_agent 的私聊、群聊均按 DEAP 已发布成员/部门/本企业全员范围校验，不叠加本地白名单。变更 set-visibility 草稿后须 publish；撤销后下一条消息重新查询。查询失败、身份不符或协议格式错误时拒绝处理，不回退白名单，且不写入事件去重记录。
-- 其他本地场景单聊接受 operator 或 `allowedDirectSenders`，群聊接受 `allowedGroups`；旧 DWS 未声明此能力时保留旧行为，启用新策略须同时升级 DWS。旧服务端绑定需用原管理账号执行 `connect restart` 固定查询 Profile。
+- `platform`：启动时从 DWS 已验证绑定确定。私聊消息经过平台可见范围授权后才投递，群聊只接受原生 @ 当前员工；均不再逐条查询 `channel binding`、visibility 或通讯录，不叠加本地白名单。
+- `local_allowlist`：单聊接受 operator 或 `allowedDirectSenders`，群聊接受 `allowedGroups`，保持已有群消息触发语义。未知策略、缺少 `bindingAccessPolicy` 能力或绑定身份不符拒绝启动，须配套升级 DWS，不降级为默认放行。
 - 未授权消息静默丢弃，只上报无正文的拒绝审计。
 - 敏感操作优先通过 operator 私聊的 A2UI 卡片审批；能力不可用时使用 operator 私聊一次性确认码。白名单普通成员不能批准。
 - 会话键包含 `agentUuid + conversationId`；`chat-sender` 还包含发送者身份。
 - 每个员工拥有独立的进程、Queue、Session binding、事件 ledger、发送消息 ledger 和 `0700/0600` 状态目录。
-- 事件按 `eventId` 持久化去重；已发送 `openMessageId` 用于阻断回复回环。
+- 先按已验证员工自身 `selfOpenDingTalkId` 过滤自发消息，再按 `eventId` 持久化去重；已发送 `openMessageId` 额外阻断回复回环。
 - 启动失败按 DWS `retryable=false/true/unknown` 执行 `0/2/1` 次重试。
 - 停止时先关闭 stdin，等待优雅退出，再发送 SIGTERM；正常路径不使用 SIGKILL。
 

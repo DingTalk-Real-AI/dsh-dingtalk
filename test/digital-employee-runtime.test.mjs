@@ -8,6 +8,7 @@ import { strictAgentContext } from './helpers/strict-agent-context.mjs'
 
 import { authorizeDigitalEmployeeEvent, DwsDigitalEmployeeSource } from '../lib/digital-employee-runtime.js'
 import { apply } from '../lib/index.js'
+import { requestEmployeeControl } from '../lib/digital-employee-control.js'
 
 async function waitFor(check) {
   for (let attempt = 0; attempt < 200; attempt++) {
@@ -30,6 +31,26 @@ const employee = {
 }
 
 async function writeFakeDwsCommand(root, name, source, pathCommand = false) {
+  // 每个 fake 都实现启动时的无发送者绑定核验，入站不再触发远端授权查询。
+  if (!source.includes("operation === 'binding'")) {
+    source = source.replace(
+      'const args = process.argv.slice(2)',
+      `const args = process.argv.slice(2)
+if (args.includes('binding')) {
+  let input = '';
+  process.stdin.on('data', (chunk) => input += chunk);
+  process.stdin.on('end', () => {
+    const value = JSON.parse(input);
+    console.log(JSON.stringify({ ok: true, outcome: 'success', data: {
+      agentUuid: value.agentUuid, bindingRevision: value.bindingRevision,
+      dwsProfile: args[args.indexOf('--profile') + 1], channel: 'dsh',
+      bindingState: 'bound', desiredState: 'running', accessPolicy: 'local_allowlist'
+    }}));
+  });
+  return;
+}`,
+    )
+  }
   if (pathCommand) {
     // 仓库内 TMPDIR 会继承 ESM；无扩展名的 fake CLI 仍应按 CommonJS 执行。
     await writeFile(path.join(root, 'package.json'), JSON.stringify({ type: 'commonjs' }))
@@ -57,7 +78,8 @@ test('已通过信号退出的 Consumer 在启动失败后仍能完成 stop', { 
     log() {},
     onMessage() {},
   })
-  runtime.replySink.probe = async () => {}
+  runtime.prepare = async () => {}
+  runtime.replySink.bindingAccessPolicy = () => 'local_allowlist'
   t.after(async () => {
     await runtime.stop()
     await rm(root, { recursive: true, force: true })
@@ -115,7 +137,7 @@ test('订阅断线后的迟到成功回复不能恢复 ready 或重新开启卡�
 const fs = require('node:fs')
 const args = process.argv.slice(2)
 if (args.includes('capabilities')) {
-  process.stdout.write(JSON.stringify({ ok: true, outcome: 'success', data: { schemaVersion: 1, protocolVersion: 1, auditMode: 'local_required', capabilities: { eventConsume: true, chatDelivery: true } }, meta: {} }))
+  process.stdout.write(JSON.stringify({ ok: true, outcome: 'success', data: { schemaVersion: 1, protocolVersion: 1, auditMode: 'local_required', capabilities: { eventConsume: true, chatDelivery: true, bindingAccessPolicy: true } }, meta: {} }))
 } else if (args.includes('consume')) {
   process.stderr.write('[event] ready\\nretryable=false\\n')
   setInterval(() => { if (fs.existsSync(args[0])) process.exit(1) }, 5)
@@ -188,7 +210,7 @@ const args = process.argv.slice(2)
 const file = (name) => path.join(args[0], name)
 const envelope = (data) => process.stdout.write(JSON.stringify({ ok: true, outcome: 'success', data, meta: {} }))
 if (args.includes('capabilities')) {
-  envelope({ schemaVersion: 1, protocolVersion: 1, auditMode: 'local_required', capabilities: { eventConsume: true, chatDelivery: true } })
+  envelope({ schemaVersion: 1, protocolVersion: 1, auditMode: 'local_required', capabilities: { eventConsume: true, chatDelivery: true, bindingAccessPolicy: true } })
 } else if (args.includes('consume')) {
   const count = fs.existsSync(file('consume-count')) ? Number(fs.readFileSync(file('consume-count'), 'utf8')) + 1 : 1
   fs.writeFileSync(file('consume-count'), String(count))
@@ -306,6 +328,11 @@ if (args.includes('--help')) {
   process.exit(0)
 }
 if (args.includes('--local-lease')) {
+  fs.appendFileSync(record, JSON.stringify({ operation: 'lease', args }) + '\\n')
+  if (process.env.FAKE_DWS_LEASE_ERROR) {
+    process.stderr.write(process.env.FAKE_DWS_LEASE_ERROR, () => process.exit(3))
+    return
+  }
   process.stderr.write('[employee] leased\\n')
   process.stdin.resume()
   process.stdin.on('end', () => process.exit(0))
@@ -319,7 +346,7 @@ if (args.includes('send-a2ui-card') || args.includes('update-a2ui-card')) {
   process.exit(0)
 }
 if (operation === 'capabilities') {
-  process.stdout.write(JSON.stringify({ ok: true, outcome: 'success', data: { schemaVersion: 1, protocolVersion: 1, auditMode: 'local_required', capabilities: { eventConsume: true, chatDelivery: true } }, meta: {} }))
+  process.stdout.write(JSON.stringify({ ok: true, outcome: 'success', data: { schemaVersion: 1, protocolVersion: 1, auditMode: 'local_required', capabilities: { eventConsume: true, chatDelivery: true, bindingAccessPolicy: true } }, meta: {} }))
   process.exit(0)
 }
 
@@ -364,7 +391,7 @@ if (operation === 'consume') {
   process.stdin.on('end', () => {
     const value = operation === 'binding' ? JSON.parse(input) : { conversationId: operation === 'reply' ? args[args.indexOf('--group') + 1] : 'operator-conversation', idempotencyKey: args[args.indexOf('--idempotency-key') + 1] }
     if (operation === 'binding') {
-      process.stdout.write(JSON.stringify({ ok: true, outcome: 'success', data: { agentUuid: value.agentUuid, dwsProfile: args[args.indexOf('--profile') + 1], bindingRevision: value.bindingRevision, channel: 'dsh', bindingState: 'bound', desiredState: 'running' } }))
+      process.stdout.write(JSON.stringify({ ok: true, outcome: 'success', data: { agentUuid: value.agentUuid, dwsProfile: args[args.indexOf('--profile') + 1], bindingRevision: value.bindingRevision, channel: 'dsh', bindingState: 'bound', desiredState: 'running', accessPolicy: 'local_allowlist' } }))
       return
     }
     const openMessageId = process.env.FAKE_DWS_EMPTY_RECEIPT === '1' ? '' : operation === 'reply' ? 'outgoing-1' : 'operator-message-1'
@@ -380,7 +407,7 @@ async function createRetryFakeDws(root) {
 const fs = require('node:fs')
 const args = process.argv.slice(2)
 if (args.includes('capabilities')) {
-  process.stdout.write(JSON.stringify({ ok: true, outcome: 'success', data: { schemaVersion: 1, protocolVersion: 1, auditMode: 'local_required', capabilities: { eventConsume: true, chatDelivery: true } }, meta: {} }))
+  process.stdout.write(JSON.stringify({ ok: true, outcome: 'success', data: { schemaVersion: 1, protocolVersion: 1, auditMode: 'local_required', capabilities: { eventConsume: true, chatDelivery: true, bindingAccessPolicy: true } }, meta: {} }))
   process.exit(0)
 }
 if (args.includes('consume')) {
@@ -407,7 +434,7 @@ async function createAuditFailFakeDws(root) {
   const source = `#!/usr/bin/env node
 const args = process.argv.slice(2)
 if (args.includes('capabilities')) {
-  process.stdout.write(JSON.stringify({ ok: true, outcome: 'success', data: { schemaVersion: 1, protocolVersion: 1, auditMode: 'local_required', capabilities: { eventConsume: true, chatDelivery: true } }, meta: {} }))
+  process.stdout.write(JSON.stringify({ ok: true, outcome: 'success', data: { schemaVersion: 1, protocolVersion: 1, auditMode: 'local_required', capabilities: { eventConsume: true, chatDelivery: true, bindingAccessPolicy: true } }, meta: {} }))
   process.exit(0)
 }
 
@@ -434,7 +461,7 @@ const isAlive = (pid) => {
   try { process.kill(pid, 0); return true } catch { return false }
 }
 if (args.includes('capabilities')) {
-  process.stdout.write(JSON.stringify({ ok: true, outcome: 'success', data: { schemaVersion: 1, protocolVersion: 1, auditMode: 'local_required', capabilities: { eventConsume: true, chatDelivery: true } }, meta: {} }))
+  process.stdout.write(JSON.stringify({ ok: true, outcome: 'success', data: { schemaVersion: 1, protocolVersion: 1, auditMode: 'local_required', capabilities: { eventConsume: true, chatDelivery: true, bindingAccessPolicy: true } }, meta: {} }))
   process.exit(0)
 }
 if (args.includes('consume')) {
@@ -569,6 +596,67 @@ function pluginConfig(workspace, digitalEmployees) {
     debug: false,
   }
 }
+
+test('lease 失败停止且未消费消息或启动模型，不泄露服务端错误', { skip: process.platform === 'win32' }, async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-lease-'))
+  const keys = ['PATH', 'FAKE_DWS_RECORD', 'DSH_DINGTALK_STATE_DIR', 'FAKE_DWS_LEASE_ERROR']
+  const old = Object.fromEntries(keys.map((key) => [key, process.env[key]]))
+  const binDir = path.join(root, 'bin')
+  await mkdir(binDir)
+  await createFakeDws(binDir, true)
+  const recordFile = path.join(root, 'calls.jsonl')
+  const stateDir = path.join(root, 'state')
+  Object.assign(process.env, {
+    PATH: `${binDir}${path.delimiter}${process.env.PATH}`,
+    FAKE_DWS_RECORD: recordFile,
+    DSH_DINGTALK_STATE_DIR: stateDir,
+    FAKE_DWS_LEASE_ERROR: JSON.stringify({
+      error: {
+        code: 3,
+        category: 'validation',
+        reason: 'untrusted_backend_error',
+        retryable: false,
+        message: 'PRIVATE_MIGRATION_ERROR',
+        hint: 'PRIVATE_RECOVERY_HINT',
+      },
+    }),
+  })
+  const logs = []
+  t.mock.method(console, 'log', (line) => logs.push(String(line)))
+  const host = createHost()
+  t.after(async () => {
+    await host.dispose()
+    for (const key of keys) {
+      if (old[key] === undefined) delete process.env[key]
+      else process.env[key] = old[key]
+    }
+    await rm(root, { recursive: true, force: true })
+  })
+  await apply(host.ctx, { ...pluginConfig(path.join(root, 'workspace'), [employee]), interactionMode: 'text' })
+  const calls = (await readFile(recordFile, 'utf8')).trim().split('\n').map(JSON.parse)
+  assert.deepEqual(
+    calls.map((call) => call.operation),
+    ['capabilities', 'binding', 'lease'],
+  )
+  assert.equal(host.followups.length, 0)
+  assert.equal(host.sessions.length, 0)
+  const status = await requestEmployeeControl(
+    {
+      protocolVersion: 1,
+      action: 'status',
+      agentUuid: employee.agentUuid,
+      dwsProfile: employee.dwsProfile,
+      bindingRevision: 0,
+    },
+    stateDir,
+  )
+  assert.equal(status.runtimeState, 'stopped')
+  assert.equal(status.transportReady, false)
+  assert.equal(status.executorReady, false)
+  assert.equal(status.released, true)
+  assert.match(logs.join('\n'), /employee lease startup failed \(employee_lease_unavailable\)/)
+  assert.doesNotMatch(logs.join('\n'), /PRIVATE_MIGRATION_ERROR|PRIVATE_RECOVERY_HINT|channel up/)
+})
 
 test('上下文单参数 setup 后，文字审批由钉钉接管并可取消', { skip: process.platform === 'win32' }, async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-text-approval-'))
@@ -1033,6 +1121,7 @@ test('白名单先于调度且不同会话不受长任务阻塞', async (t) => {
     },
   })
   runtime.replySink.audit = async (fields) => audits.push(fields)
+  runtime.replySink.bindingAccessPolicy = () => 'local_allowlist'
   t.after(async () => {
     releaseTask()
     await runtime.stop()
@@ -1142,48 +1231,127 @@ test(
   },
 )
 
-for (const scenario of ['visible', 'revoked', 'unavailable', 'local']) {
-  test(`访问策略 ${scenario} 在调度前生效且查询失败不消费事件`, async (t) => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'employee-visibility-'))
-    const seen = []
-    const audits = []
+for (const policy of ['platform', 'local_allowlist']) {
+  test(`启动验证策略 ${policy} 后入站无查询，保留去重与自发消息过滤`, async (t) => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'employee-access-'))
+    const seen = [],
+      calls = []
     const runtime = new DwsDigitalEmployeeSource({
       employee,
       stateDir: path.join(root, 'state'),
       log() {},
-      onMessage(input) {
-        seen.push(input)
-      },
+      onMessage: (input) => seen.push(input),
     })
     t.after(async () => {
       await runtime.stop()
       await rm(root, { recursive: true, force: true })
     })
-    runtime.replySink.audit = async (fields) => audits.push(fields)
-    runtime.replySink.visibilityAccess = async () => {
-      if (scenario === 'unavailable') throw new Error('query_failed')
-      return scenario === 'local' ? undefined : scenario === 'visible'
+    runtime.replySink.execJson = async (args, input) => {
+      calls.push({ args, input })
+      if (args.includes('capabilities'))
+        return {
+          schemaVersion: 1,
+          protocolVersion: 1,
+          auditMode: 'local_required',
+          capabilities: { eventConsume: true, chatDelivery: true, bindingAccessPolicy: true },
+        }
+      assert.deepEqual(input, { agentUuid: employee.agentUuid, bindingRevision: 0 })
+      return {
+        agentUuid: employee.agentUuid,
+        dwsProfile: employee.dwsProfile,
+        channel: 'dsh',
+        bindingRevision: 0,
+        bindingState: 'bound',
+        desiredState: 'running',
+        accessPolicy: policy,
+        selfOpenDingTalkId: 'fixture-self',
+      }
     }
+    let consumerStarts = 0
+    runtime.startConsumer = async () => {
+      consumerStarts++
+    }
+    await runtime.start()
+    await runtime.prepare()
+    assert.equal(consumerStarts, 1)
+    assert.equal(calls.length, 2)
     const event = {
       schemaVersion: 1,
-      eventId: 'visibility-event',
-      messageId: 'visibility-message',
+      eventId: 'access-a',
+      messageId: 'message-a',
       conversationId: 'unlisted-chat',
       conversationType: 'direct',
-      senderOpenDingTalkId: scenario === 'visible' ? 'unlisted-person' : 'operator-open-id',
+      senderOpenDingTalkId: 'unlisted-person',
       senderName: '成员',
-      text: 'hello',
+      text: 'A',
       createdAt: '1',
     }
-    if (scenario === 'unavailable') {
-      await assert.rejects(runtime.handleEvent(event), /visibility_access_unavailable/)
-      assert.equal(runtime.ledger.hasEvent(event.eventId), false)
-    } else await runtime.handleEvent(event)
-    assert.equal(seen.length, scenario === 'visible' || scenario === 'local' ? 1 : 0)
-    assert.equal(
-      audits[0].status,
-      scenario === 'unavailable' ? 'unavailable' : scenario === 'revoked' ? 'denied' : 'accepted',
+    await runtime.handleEvent(event)
+    await runtime.handleEvent(event)
+    await runtime.handleEvent({ ...event, eventId: 'access-b', messageId: 'message-b', text: 'B' })
+    runtime.ledger.markSentMessage('self-message')
+    await runtime.handleEvent({ ...event, eventId: 'self-event', messageId: 'self-message' })
+    await runtime.handleEvent({
+      ...event,
+      eventId: 'external-self-event',
+      messageId: 'external-self-message',
+      senderOpenDingTalkId: 'fixture-self',
+    })
+    assert.equal(runtime.ledger.hasEvent('external-self-event'), false, '自身其他进程发送的消息也不进入模型')
+    assert.equal(seen.length, policy === 'platform' ? 2 : 0)
+    assert.equal(calls.length, 2, '连续两条、重复事件与自身回复均不得重新查询 binding/visibility')
+    assert.equal(runtime.ledger.hasEvent('self-event'), false)
+  })
+}
+
+for (const scenario of ['missing-capability', 'unknown-policy', 'wrong-identity']) {
+  test(`直接 source.start 在 ${scenario} 时拒绝启动 consumer`, async (t) => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'employee-policy-reject-'))
+    const runtime = new DwsDigitalEmployeeSource({
+      employee: { ...employee, accessPolicy: 'platform' },
+      stateDir: path.join(root, 'state'),
+      log() {},
+      onMessage() {},
+    })
+    t.after(async () => {
+      await runtime.stop()
+      await rm(root, { recursive: true, force: true })
+    })
+    runtime.replySink.execJson = async (args) =>
+      args.includes('capabilities')
+        ? {
+            schemaVersion: 1,
+            protocolVersion: 1,
+            auditMode: 'local_required',
+            capabilities: {
+              eventConsume: true,
+              chatDelivery: true,
+              bindingAccessPolicy: scenario !== 'missing-capability',
+            },
+          }
+        : {
+            agentUuid: scenario === 'wrong-identity' ? 'other-employee' : employee.agentUuid,
+            dwsProfile: employee.dwsProfile,
+            channel: 'dsh',
+            bindingRevision: 0,
+            bindingState: 'bound',
+            desiredState: 'running',
+            accessPolicy: scenario === 'unknown-policy' ? 'anything' : 'platform',
+          }
+    const audits = []
+    runtime.replySink.audit = async (fields) => audits.push(fields)
+    let started = false
+    runtime.startConsumer = async () => {
+      started = true
+    }
+    await assert.rejects(
+      runtime.start(),
+      /incompatible_dws_capabilities|invalid_binding_access_policy|binding_not_authorized/,
     )
+    assert.equal(started, false)
+    assert.equal(audits.length, 0, '绑定策略未确认不能记录 runtime_start ready')
+    assert.throws(() => runtime.replySink.bindingAccessPolicy(), /binding_access_policy_unverified/)
+    assert.equal(runtime.currentStatus().state, 'failed')
   })
 }
 
@@ -1203,8 +1371,7 @@ for (const mentioned of [true, false]) {
       await runtime.stop()
       await rm(root, { recursive: true, force: true })
     })
-    runtime.replySink.useGroupMembershipAccess = true
-    runtime.replySink.visibilityAccess = async () => true
+    runtime.replySink.bindingAccessPolicy = () => 'platform'
     runtime.replySink.audit = async () => {}
     assert.ok(runtime.subscriptionTopics().includes('user_im_message_receive_at'))
     assert.ok(!runtime.subscriptionTopics().includes('user_im_message_receive_group_all'))

@@ -17,6 +17,7 @@ class RobotStreamSource {
   async stop() {}
 }
 class DwsDigitalEmployeeSource extends RobotStreamSource {
+  async prepare() {}
   replySink = {
     async verifyBinding() {},
     async audit() {},
