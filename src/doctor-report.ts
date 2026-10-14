@@ -256,7 +256,7 @@ async function collectDigitalEmployeeReport(
   const subscriptionsReady =
     runtimeFresh &&
     topics.includes('user_im_message_receive_o2o_all') &&
-    topics.includes('user_im_message_receive_group_all')
+    (topics.includes('user_im_message_receive_group_all') || topics.includes('user_im_message_receive_at'))
   checks.push(
     observedCheck(
       subscriptionsReady,
