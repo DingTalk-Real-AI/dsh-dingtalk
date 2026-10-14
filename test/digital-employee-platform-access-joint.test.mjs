@@ -63,7 +63,11 @@ async function fixture(t, bindingFields, events) {
   await mkdir(runtimeDir, { recursive: true })
   await writeFile(
     path.join(runtimeDir, 'adapter.json'),
-    JSON.stringify({ binding: JSON.parse(original), selfOpenDingTalkId: 'fixture-self' }),
+    JSON.stringify({
+      binding: JSON.parse(original),
+      selfOpenDingTalkId: 'fixture-self',
+      selfIdentityProfile: employee.dwsProfile,
+    }),
   )
   const env = {
     HOME: root,
