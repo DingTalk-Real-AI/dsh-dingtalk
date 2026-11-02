@@ -233,6 +233,19 @@ New bot accounts default to all senders and all groups. Access policies are conf
 
 Chat access never grants sensitive approval authority. Interactive-card and text-code approvals remain owner-only. The owner can approve a group member's request in the same group; sensitive operations requested from another member's direct chat are rejected.
 
+## First-response emotion
+
+To customize the reaction shown while processing, merge these fields into `dingtalk-channel` in `$DSH_HOME/profiles/web/cordis.patch.yml` (default: `~/.dsh/profiles/web/cordis.patch.yml`):
+
+```yaml
+- id: dingtalk-channel
+  config:
+    emotionFirstResponse: true
+    emotionFirstResponseText: '🔍正在查代码'
+```
+
+Whitespace is trimmed; omitted or blank text defaults to `🤔思考中`. The reaction is recalled when the task finishes. Disable it with `emotionFirstResponse: false`. Restart `dsh web` after changes.
+
 ## Advanced installation
 
 The one-command setup is recommended. Advanced users may install the package through DSH directly:

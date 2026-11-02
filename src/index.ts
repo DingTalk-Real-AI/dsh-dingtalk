@@ -507,7 +507,7 @@ async function startAccount(
     )
     fs.chmodSync(cardCapabilityFile, 0o600)
   })
-  const emotion = new Emotion(() => outbound.token(), clientId, log)
+  const emotion = new Emotion(() => outbound.token(), clientId, log, config.emotionFirstResponseText)
   const renderer = new Renderer({
     config,
     outbound: replySink,

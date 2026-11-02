@@ -267,6 +267,19 @@ input:
 
 开放聊天权限不会开放敏感审批：互动卡片和文字确认码仍只接受管理员。其他成员在群里触发敏感操作时，管理员可在同一群审批；其他成员私聊触发的敏感操作会直接拒绝。
 
+## 首次响应表情
+
+在 `$DSH_HOME/profiles/web/cordis.patch.yml`（默认 `~/.dsh/profiles/web/cordis.patch.yml`）的 `dingtalk-channel` 配置中合并以下字段，即可自定义处理期间的表情：
+
+```yaml
+- id: dingtalk-channel
+  config:
+    emotionFirstResponse: true
+    emotionFirstResponseText: '🔍正在查代码'
+```
+
+内容会去除首尾空白，未配置或全空白时默认使用 `🤔思考中`，任务结束后撤回。设为 `emotionFirstResponse: false` 可关闭提示。修改后重启 `dsh web`。
+
 ## 高级安装方式
 
 推荐使用一条命令的 setup。高级用户也可以使用 DSH 原生命令：
