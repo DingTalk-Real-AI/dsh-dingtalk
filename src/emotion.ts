@@ -7,23 +7,32 @@
 
 const DINGTALK_API = 'https://api.dingtalk.com'
 
-const EMOTION_BODY = {
-  emotionType: 2,
-  emotionName: '🤔思考中',
-  textEmotion: {
-    emotionId: '2659900',
-    emotionName: '🤔思考中',
-    text: '🤔思考中',
-    backgroundId: 'im_bg_1',
-  },
+export const DEFAULT_EMOTION_TEXT = '🤔思考中'
+
+function emotionBody(text: string) {
+  return {
+    emotionType: 2,
+    emotionName: text,
+    textEmotion: {
+      emotionId: '2659900',
+      emotionName: text,
+      text,
+      backgroundId: 'im_bg_1',
+    },
+  }
 }
 
 export class Emotion {
+  private readonly body: ReturnType<typeof emotionBody>
+
   constructor(
     private readonly token: () => Promise<string>,
     private readonly robotCode: string,
     private readonly log: (line: string) => void,
-  ) {}
+    text = DEFAULT_EMOTION_TEXT,
+  ) {
+    this.body = emotionBody(text.trim() || DEFAULT_EMOTION_TEXT)
+  }
 
   private async post(path: 'reply' | 'recall', openMsgId: string, openConversationId: string): Promise<void> {
     const token = await this.token()
@@ -33,7 +42,7 @@ export class Emotion {
       const resp = await fetch(`${DINGTALK_API}/v1.0/robot/emotion/${path}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-acs-dingtalk-access-token': token },
-        body: JSON.stringify({ robotCode: this.robotCode, openMsgId, openConversationId, ...EMOTION_BODY }),
+        body: JSON.stringify({ robotCode: this.robotCode, openMsgId, openConversationId, ...this.body }),
         signal: controller.signal,
       })
       if (!resp.ok) this.log(`emotion ${path} failed ${resp.status}: ${(await resp.text()).slice(0, 200)}`)

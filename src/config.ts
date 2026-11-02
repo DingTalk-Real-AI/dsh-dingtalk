@@ -1,5 +1,6 @@
 /** Plugin configuration schema (schemastery-validated, editable from DSH config layers). */
 import Schema from '@deepseek-ai/schemastery'
+import { DEFAULT_EMOTION_TEXT } from './emotion.js'
 import type { DigitalEmployeeConfig, GroupAccess, ImageMode, SenderAccess } from './setup-state.js'
 
 export type ReplyMode = 'aicard' | 'markdown' | 'text'
@@ -47,6 +48,7 @@ export interface Config {
   /** 旧配置兼容；true 等价于 always，false 等价于 never。 */
   attachImages?: boolean
   emotionFirstResponse: boolean
+  emotionFirstResponseText?: string
   rejectNotice: boolean
   debug: boolean
 }
@@ -158,7 +160,10 @@ export const Config: Schema<Config> = Schema.object({
   attachImages: Schema.boolean().description('旧版兼容项；请改用 imageMode。true=always，false=never'),
   emotionFirstResponse: Schema.boolean()
     .default(true)
-    .description('收到消息立即在用户消息上贴「🤔思考中」表情，任务结束撤回'),
+    .description('收到消息立即在用户消息上贴文字表情，任务结束撤回；内容由 emotionFirstResponseText 配置'),
+  emotionFirstResponseText: Schema.string()
+    .default(DEFAULT_EMOTION_TEXT)
+    .description('首次响应文字表情的内容（可含 emoji）；去除首尾空白，未配置或全空白时使用「🤔思考中」'),
   sessionScope: Schema.union(['chat', 'chat-sender'])
     .default('chat')
     .description('会话隔离粒度：chat = 一个聊天一个会话；chat-sender = 群聊里每个成员独立会话（单聊不受影响）'),
