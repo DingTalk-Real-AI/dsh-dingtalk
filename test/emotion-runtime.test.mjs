@@ -108,6 +108,7 @@ for (const enabled of [true, false]) {
         })
       }
       while (requests.filter(({ url }) => String(url).startsWith('https://fixture.invalid/')).length < 2) {
+        t.signal.throwIfAborted()
         await new Promise((resolve) => setImmediate(resolve))
       }
       const emotions = requests.filter(({ url }) => String(url).includes('/robot/emotion/'))
