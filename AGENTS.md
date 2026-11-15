@@ -8,3 +8,4 @@
 - Release workflow 只允许从 `main` 手动触发；首次组织发布固定为 `0.5.0`，后续由 Conventional Commits 自动计算版本。
 - NPM 发布必须使用 Trusted Publisher OIDC 和 provenance，不得恢复长期 NPM Token。
 - Release workflow 不得向 `main` 写回版本或 Changelog 提交；版本号和 Release Notes 由 semantic-release 在发布时生成。
+- **并行委派**：处理任务时，只要条件允许，尽量把任务拆成相互独立的子任务并用 subagent 并行处理，而不是自己串行做完：相互独立的委派在同一条回复里同时发起（需要本会话上下文背景的用 subagent_fork，自包含任务用 subagent）；委派发出后继续处理不依赖其结果的工作，不空等，等全部结果回来再汇总；委派描述必须自包含——子代理看不到本会话历史，背景、路径、凭据位置、验收标准都要写全；琐碎的单步操作或强串行依赖的步骤不要委派；几十个以上独立单元的扇出改用 workflow。
